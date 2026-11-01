@@ -1,0 +1,2187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Falcon Dive</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #000; }
+  canvas { display: block; cursor: crosshair; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script>
+const canvas = document.getElementById('game');
+let ctx = canvas.getContext('2d'); // swapped temporarily when pre-rendering cached sprites
+let W, H;
+function resize() { W = canvas.width = innerWidth; H = canvas.height = innerHeight; }
+addEventListener('resize', resize); resize();
+
+// ---------- Tunables ----------
+const G = 9.81;               // gravity m/s²
+const MAX_ALT = 500;
+const DRAG = G / (95 * 95);   // terminal dive ~95 m/s (~340 km/h)
+const BRAKE_DRAG = DRAG * 10;
+const FLAP_THRUST = 30;       // m/s² while flapping
+const FLAP_MAX_SPEED = 50;    // flapping can't push past this
+const STALL_SPEED = 10;
+const DIVE_SPEED = 40;        // above this (and pointing down) = dive mode
+const SAFE_VSPEED = 14;       // max descent rate on ground contact (m/s)
+const BRAKE_DURATION = 2.5;   // seconds of continuous braking from a full meter
+const BRAKE_RECHARGE = 5;     // seconds to refill from empty
+const BRAKE_UNLOCK = 0.3;     // after running dry, the meter must refill this far before braking again
+const SHELL_CRACK_SPEED = 65; // m/s impact needed to crack a dropped turtle (~215 m free fall from rest)
+const TURTLE_THROW = 10;      // m/s max extra push toward the cursor when releasing an aimed throw
+const THROW_LOCK_GROUND = 20; // m from the predicted landing spot to lock onto a ground animal
+const THROW_LOCK_AIR = 15;    // m from the predicted arc to lock onto a flying animal
+const TURTLE_HOMING = 5;      // m/s² of sideways correction toward a locked target while falling
+const SHADOW_ALT = 50;        // the bird casts a visible shadow (that prey can notice) only below this height
+const STARLING_COMBO_TIME = 2;    // seconds to grab more starlings after the first
+const STARLING_EXTRA_PTS = 150;
+const VIEW_MARGIN = 70;       // px kept between the top of the screen and the bird
+const ZOOM_CAP_ALT = 200;     // never zoom out further than needed to show this much height
+const AIR_FOCUS_DIST = 70;    // metres; closer than this to a flying target and the camera frames the chase
+const lerp = (a, b, t) => a + (b - a) * t;
+const groundPx = () => Math.max(90, H * 0.15); // screen space reserved for ground
+const LENS_R = 38;
+const ABOVE_CEILING_DRAG = 0.35; // thin air above the ceiling: no flapping, but less drag
+const PAUSE_BTN = { x: 10, y: 10, w: 44, h: 44 };
+
+// ---------- Input ----------
+const mouse = { x: W / 2, y: H / 2, down: false };
+const inPauseBtn = (x, y) =>
+  x >= PAUSE_BTN.x && x <= PAUSE_BTN.x + PAUSE_BTN.w && y >= PAUSE_BTN.y && y <= PAUSE_BTN.y + PAUSE_BTN.h;
+canvas.addEventListener('mousemove', e => {
+  mouse.x = e.clientX; mouse.y = e.clientY;
+  canvas.style.cursor = inPauseBtn(e.clientX, e.clientY) ? 'pointer' : 'crosshair';
+});
+canvas.addEventListener('mousedown', e => {
+  if (inPauseBtn(e.clientX, e.clientY)) { if (!state.over) togglePause(); return; }
+  if (paused) { paused = false; return; }
+  // Right-click: hold to aim (landing marker shown), release to throw toward the cursor
+  if (e.button === 2) { if (bird.carrying) mouse.aiming = true; return; }
+  mouse.down = true;
+  if (state.over) reset();
+});
+addEventListener('mouseup', e => {
+  if (e.button !== 2) { mouse.down = false; return; }
+  if (mouse.aiming) dropTurtle(true);
+  mouse.aiming = false;
+});
+canvas.addEventListener('contextmenu', e => e.preventDefault());
+
+let paused = false;
+function togglePause() { paused = !paused; mouse.down = false; }
+addEventListener('keydown', e => {
+  if ((e.key === 'p' || e.key === 'P' || e.key === 'Escape') && !state.over) togglePause();
+  if (e.key === ' ') { e.preventDefault(); dropTurtle(); }
+});
+addEventListener('blur', () => { if (!state.over) paused = true; mouse.down = false; mouse.aiming = false; });
+
+// ---------- State ----------
+let state, bird, prey, particles, cam;
+function reset() {
+  // New world layout each run, re-rolled until no thermal (and its buzzard) sits right at the start
+  for (let tries = 0; tries < 30; tries++) {
+    worldSeed = Math.random() * 1000;
+    if (![-1, 0, 1].some(i => { const th = thermalCol(i); return th.on && Math.abs(th.x) < 350; })) break;
+  }
+  bird = { x: 0, alt: 220, speed: 20, angle: 0, flapT: 0, mode: 'GLIDE', passMin: Infinity, carrying: null,
+           brakeE: 1, brakeLocked: false };
+  prey = [];
+  particles = [];
+  cam = { x: 0, alt: 220, zoom: 2.5, zoomY: 2.5, gz: 2.5, focus: 0, ft: null, shake: 0 };
+  state = { score: 0, catches: 0, over: false, msg: '', msgT: 0, maxSpeed: 0, nextGroundX: 150, nextAirX: 300,
+            catchLog: [], time: 0, wake: [], wakeT: 0, fallers: [], rings: [],
+            wind: { x: (Math.random() * 2 - 1) * 6, target: 0, changeT: 0, hx: (Math.random() * 2 - 1) * 10, htarget: 0, hchangeT: 0 },
+            cloudOff: 0, cirrusOff: 0, fog: 0,
+            tod: 0.3, storm: { t: 0, dur: 1, next: 90 + Math.random() * 90, dir: 1, k: 0, flash: 0 },
+            devils: [], devilT: 15, rivals: [], rivalSeen: {}, nextLakeI: 0, lastCatch: null };
+  spawnPreyAhead();
+}
+
+// ---------- Prey species ----------
+// scale: on-screen sprite size (deliberately larger than true scale so animals read clearly)
+const SPECIES = {
+  rabbit:   { name: 'Rabbit',   air: false, pts: 100, weight: 40, catchAlt: 1.5, radius: 6, scale: 1.9 },
+  hare:     { name: 'Hare',     air: false, pts: 200, weight: 20, catchAlt: 1.5, radius: 6, scale: 2.3 },
+  mouse:    { name: 'Mouse',    air: false, pts: 80,  weight: 20, catchAlt: 0.8, radius: 3, scale: 2.15 },
+  squirrel: { name: 'Squirrel', air: false, pts: 250, weight: 12, catchAlt: 1.5, radius: 5, scale: 1.7 },
+  turtle:   { name: 'Turtle',   air: false, pts: 300, weight: 8,  catchAlt: 1.5, radius: 6, scale: 2.45 },
+  // minStrike: your own speed needed; minRel: speed relative to the prey needed (both m/s, written as km/h / 3.6)
+  pigeon:   { name: 'Pigeon',   air: true,  pts: 300, weight: 40, minStrike: 90 / 3.6, minRel: 54 / 3.6, alt: [30, 200], speed: 18, scale: 1.45 },
+  duck:     { name: 'Duck',     air: true,  pts: 400, weight: 20, minStrike: 120 / 3.6, minRel: 72 / 3.6, alt: [20, 120], speed: 25, scale: 1.7 },
+  swift:    { name: 'Swift',    air: true,  pts: 500, weight: 15, minStrike: 60 / 3.6, minRel: 36 / 3.6, alt: [40, 250], speed: 22, scale: 2.0 },
+  flock:    { name: 'Starling', air: true,  pts: 350, weight: 25, minStrike: 0, minRel: 0, alt: [80, 300], speed: 15, scale: 2.7 },
+};
+const ICON_SCALE = 2.0;   // sprite scale that maps to 1.0 in catch-card icons
+const FALCON_SCALE = 1.5; // minimum on-screen size of the player
+
+// Spawn-weight multiplier by time of day (d = daylight 0..1, tw = twilight 0..1)
+const ACTIVITY = {
+  mouse: (d) => 0.5 + (1 - d) * 1.5,          // nocturnal
+  hare: (d) => 0.5 + (1 - d),
+  rabbit: (d, tw) => 0.6 + tw * 1.2,          // dawn and dusk
+  squirrel: (d) => 0.2 + d,
+  turtle: (d) => 0.2 + d,
+  pigeon: (d) => 0.15 + d,
+  duck: (d, tw) => 0.4 + d * 0.6 + tw * 0.5,
+  swift: (d) => 0.1 + d,
+  flock: (d, tw) => 0.4 + tw * 2,             // dusk murmurations
+};
+
+function pickKind(air) {
+  const d = daylight(), tw = twilight();
+  const kinds = Object.keys(SPECIES).filter(k => SPECIES[k].air === air);
+  const wt = k => SPECIES[k].weight * ACTIVITY[k](d, tw);
+  let r = Math.random() * kinds.reduce((sum, k) => sum + wt(k), 0);
+  for (const k of kinds) { r -= wt(k); if (r <= 0) return k; }
+  return kinds[0];
+}
+
+const randDir = () => (Math.random() < 0.5 ? -1 : 1);
+
+function makeGround(x, kind = pickKind(false)) {
+  const dir = randDir();
+  const p = { kind, x, vx: dir * (2 + Math.random() * 4), hopT: Math.random() * 10, failCD: 0, alertT: 0 };
+  if (kind === 'hare') p.vx = dir * (1 + Math.random() * 2);
+  if (kind === 'mouse') { p.vx = dir * (1 + Math.random()); p.moving = true; p.pauseT = 0; }
+  if (kind === 'squirrel') { p.home = x + randDir() * (20 + Math.random() * 25); p.wanderX = x; p.vx = dir * 2; }
+  if (kind === 'turtle') p.vx = dir * 0.4;
+  return p;
+}
+
+function makeAir(x, kind = pickKind(true)) {
+  const s = SPECIES[kind], dir = randDir();
+  const alt = s.alt[0] + Math.random() * (s.alt[1] - s.alt[0]);
+  const p = { kind, x, alt, baseAlt: alt, vx: dir * s.speed, vy: 0, h: dir > 0 ? 0 : Math.PI,
+              flapT: Math.random() * 10, t: Math.random() * 10, spookT: 0, turnT: 0, failCD: 0, alertT: 0 };
+  if (kind === 'flock') {
+    p.scatterT = 0;
+    p.members = Array.from({ length: 24 }, () => ({
+      ox: (Math.random() - 0.5) * 30, oy: (Math.random() - 0.5) * 14, ph: Math.random() * 6.28,
+      r: 1 + Math.random() * 3, dx: 0, dy: 0, svx: 0, svy: 0, caught: false, x, alt
+    }));
+  }
+  return p;
+}
+
+function spawnPreyAhead() {
+  while (state.nextGroundX < bird.x + 1500) {
+    if (!lakeAtX(state.nextGroundX)) prey.push(makeGround(state.nextGroundX));
+    state.nextGroundX += 150 + Math.random() * 300;
+  }
+  while (state.nextAirX < bird.x + 1500) {
+    prey.push(makeAir(state.nextAirX));
+    state.nextAirX += 250 + Math.random() * 350;
+  }
+  // Ducks resting on each lake, ready to take off when they notice you
+  while (lakeAt(state.nextLakeI).x0 < bird.x + 1500) {
+    const l = lakeAt(state.nextLakeI++);
+    if (!l.on) continue;
+    for (let n = 0; n < 2 + Math.floor(Math.random() * 3); n++) {
+      const d = makeAir(l.x0 + l.w * (0.15 + Math.random() * 0.7), 'duck');
+      Object.assign(d, { sitting: true, alt: 0.4, lake: l, vx: randDir() * (0.6 + Math.random() * 0.6) });
+      prey.push(d);
+    }
+  }
+  prey = prey.filter(p => !p.gone && p.x > bird.x - 1000 && p.x < bird.x + 2500);
+}
+
+// ---------- Senses ----------
+// Vision cone (world angle, up = positive) plus hearing that depends on how noisy the bird is
+// Flying birds watch forward and down (where they're going and the ground below), so a stoop from above or behind goes unseen
+const forwardDown = (p, tilt) => { const h = Math.atan2(p.vy, p.vx); return h + (Math.cos(h) >= 0 ? -tilt : tilt); };
+const SENSES = {
+  hare:     { range: 75,  half: 1.2, reaction: 0.3,  look: p => (facing(p) > 0 ? Math.PI - 0.9 : 0.9) }, // watches up and behind
+  squirrel: { range: 75,  half: 0.8, reaction: 0.5,  look: p => (facing(p) > 0 ? 1.05 : Math.PI - 1.05) },
+  pigeon:   { range: 45,  half: 1.4, reaction: 0.25, look: p => forwardDown(p, 0.6) },
+  duck:     { range: 70,  half: 1.3, reaction: 0.4,  look: p => (p.sitting ? forwardDown(p, -0.8) : forwardDown(p, 0.6)) }, // resting ducks watch the sky
+  swift:    { range: 30,  half: 1.5, reaction: 0.1,  look: p => forwardDown(p, 0.5) },
+  flock:    { range: 35,  half: Math.PI, reaction: 0.3, look: () => 0 },
+};
+// Wind roar from a fast stoop: 8 m when gliding, growing to ~30 m at full dive speed
+const diveNoise = () => 8 + Math.max(0, Math.min(1, (bird.speed - 42) / 53)) * 22;
+const hearingRange = () => Math.max(bird.mode === 'FLAP' ? 40 : bird.mode === 'BRAKE' ? 25 : 0, diveNoise());
+const eyeAlt = p => (SPECIES[p.kind].air ? p.alt : 0.3);
+
+const lookAngle = p => p.lookA ?? SENSES[p.kind].look(p);
+
+// Gaze turns gradually so vision cones don't snap when an animal changes direction
+function updateLook(p, dt) {
+  const target = SENSES[p.kind].look(p);
+  if (p.lookA == null) { p.lookA = target; return; }
+  const diff = wrapAngle(target - p.lookA), max = 1.5 * dt;
+  p.lookA = wrapAngle(p.lookA + Math.max(-max, Math.min(max, diff)));
+}
+
+// Idle wandering: reverse direction every few seconds rather than at random each frame
+function wanderFlip(p, dt) {
+  p.turnT = (p.turnT ?? 3 + Math.random() * 4) - dt;
+  if (p.turnT <= 0) { p.vx *= -1; p.turnT = 3 + Math.random() * 4; }
+}
+
+function senses(p) {
+  const s = SPECIES[p.kind].air && !p.sitting ? null : p;
+  // Your shadow sweeping over a ground (or resting) animal gives you away in daylight
+  if (s && daylight() > 0.3 && bird.alt < SHADOW_ALT && Math.abs(bird.x + shadowOffset(bird.alt) - p.x) < 5) return true;
+  const sn = SENSES[p.kind];
+  const range = visionRange(sn);
+  const dx = bird.x - p.x, dy = bird.alt - eyeAlt(p), d = Math.hypot(dx, dy);
+  const ang = Math.atan2(dy, dx);
+  const seen = d < range && Math.abs(wrapAngle(ang - lookAngle(p))) <= sn.half;
+  return seen || d < hearingRange();
+}
+
+const visionRange = sn => sn.range * (0.45 + 0.55 * daylight()); // everyone sees less in the dark
+
+// True once the bird has been noticed for longer than the animal's reaction time
+function sensed(p, dt) {
+  p.aware = senses(p) ? (p.aware || 0) + dt : Math.max(0, (p.aware || 0) - dt * 0.5);
+  if (p.aware < SENSES[p.kind].reaction) return false;
+  p.aware = 0;
+  return true;
+}
+
+// ---------- Wind & thermals ----------
+// Horizontal wind (m/s, + = rightward). Low and high layers change independently (wind shear),
+// blended between 100 m and 350 m; gusts on top; weaker near the ground
+function windX(alt) {
+  const t = state.time, w = state.wind;
+  const gust = Math.sin(t * 0.7) * 1.5 + Math.sin(t * 1.9 + 1) * 0.8;
+  const k = Math.min(1, Math.max(0, (alt - 100) / 250));
+  const layer = w.x + (w.hx - w.x) * k * k * (3 - 2 * k);
+  const storm = state.storm.dir * 16 * state.storm.k * (1 + 0.3 * Math.sin(t * 3));
+  return (layer + gust + storm) * (0.3 + 0.7 * Math.min(1, Math.max(0, alt) / 200));
+}
+
+function updateWind(dt) {
+  const w = state.wind;
+  w.changeT -= dt;
+  if (w.changeT <= 0) { w.target = (Math.random() * 2 - 1) * 10; w.changeT = 20 + Math.random() * 20; }
+  w.hchangeT -= dt;
+  if (w.hchangeT <= 0) { w.htarget = (Math.random() * 2 - 1) * 14; w.hchangeT = 25 + Math.random() * 25; }
+  w.x += (w.target - w.x) * Math.min(1, dt * 0.1);
+  w.hx += (w.htarget - w.hx) * Math.min(1, dt * 0.08);
+  state.cloudOff += windX(CLOUD_BASE) * dt;
+  state.cirrusOff += windX(480) * dt;
+}
+
+const THERMAL_SPACING = 700;
+function thermalCol(i) {
+  return { x: i * THERMAL_SPACING + wh(i * 3.1) * 400, on: wh(i * 7.7) < 0.6,
+           s: 12 + wh(i * 5.3) * 12, w: 30 + wh(i * 2.9) * 20 };
+}
+
+// Broad sinking air, roughly between thermals
+function sinkCol(i) {
+  return { x: (i + 0.5) * THERMAL_SPACING + (wh(i * 4.1) - 0.5) * 200, on: wh(i * 6.6) < 0.5,
+           s: 2 + wh(i * 8.2) * 3, w: 50 + wh(i * 9.4) * 40 };
+}
+
+// Vertical air movement (m/s): thermal lift minus sink, fading in near the ground and out at the ceiling
+function updraft(x, alt) {
+  if (alt > MAX_ALT) return 0;
+  const i0 = Math.floor(x / THERMAL_SPACING);
+  let u = 0;
+  for (let i = i0 - 1; i <= i0 + 1; i++) {
+    const th = thermalCol(i);
+    if (th.on) {
+      const d = (x - th.x) / th.w;
+      if (Math.abs(d) < 3) u += th.s * Math.exp(-d * d);
+    }
+    const sk = sinkCol(i);
+    if (sk.on) {
+      const d = (x - sk.x) / sk.w;
+      if (Math.abs(d) < 3) u -= sk.s * Math.exp(-d * d);
+    }
+  }
+  u += ridgeLift(x, alt);
+  for (const dv of state.devils) {
+    if (alt > dv.top) continue;
+    const d = (x - dv.x) / dv.w;
+    if (Math.abs(d) < 3) u += dv.s * Math.exp(-d * d) * devilFade(dv) * (1 - alt / dv.top);
+  }
+  return u * Math.min(1, Math.max(0, alt) / 15) * Math.min(1, (MAX_ALT - alt) / 50);
+}
+
+// ---------- Day/night ----------
+const DAY_LENGTH = 240; // seconds per full day
+const sunPhase = () => ((state.tod - 0.15) / 0.7) * Math.PI; // 0 at sunrise (east/left), PI at sunset
+const daylight = () => Math.max(0, Math.min(1, Math.sin(sunPhase()) * 3 + 0.3));
+const twilight = () => Math.max(0, 1 - Math.abs(Math.sin(sunPhase())) * 4); // peaks at sunrise/sunset
+const clockText = () => {
+  const h = (state.tod * 24 + 1.2) % 24;
+  return `${String(Math.floor(h)).padStart(2, '0')}:${String(Math.floor((h % 1) * 60)).padStart(2, '0')}`;
+};
+// Horizontal offset of a shadow cast from this altitude, away from the sun
+function shadowOffset(alt) {
+  const ph = sunPhase();
+  return (alt * Math.cos(ph)) / Math.max(0.25, Math.sin(ph));
+}
+
+// ---------- Weather ----------
+function updateWeather(dt) {
+  state.tod = (state.tod + dt / DAY_LENGTH) % 1;
+  const s = state.storm;
+  s.next -= dt;
+  if (s.t <= 0 && s.next <= 0) {
+    s.t = s.dur = 20 + Math.random() * 15; s.dir = randDir(); s.next = 120 + Math.random() * 120;
+    state.msg = 'A storm front is rolling in!'; state.msgT = 2.5;
+  }
+  if (s.t > 0) s.t -= dt;
+  s.k = s.t > 0 ? Math.sin(Math.PI * (1 - s.t / s.dur)) : 0;
+  s.flash = Math.max(0, s.flash - dt);
+  if (s.k > 0.6 && Math.random() < dt * 0.15) s.flash = 0.15;
+
+  // Dust devils: short-lived spinning columns that wander over open ground ahead of you
+  state.devilT -= dt;
+  if (state.devilT <= 0) {
+    state.devilT = 15 + Math.random() * 20;
+    const x = bird.x + Math.sign(bird.vx || 1) * (250 + Math.random() * 350);
+    if (!lakeAtX(x)) state.devils.push({ x, vx: randDir() * (1 + Math.random() * 2), t: 0,
+      life: 12 + Math.random() * 10, s: 20 + Math.random() * 8, w: 6 + Math.random() * 3, top: 100 + Math.random() * 60 });
+  }
+  for (const dv of state.devils) { dv.t += dt; dv.x += (dv.vx + windX(5)) * dt; }
+  state.devils = state.devils.filter(dv => dv.t < dv.life);
+}
+const devilFade = dv => Math.min(1, dv.t / 2, (dv.life - dv.t) / 2);
+
+// ---------- Terrain: ridges (background) and lakes ----------
+const RIDGE_SPACING = 1800;
+function ridgeAt(i) {
+  return { x: i * RIDGE_SPACING + 600 + wh(i * 1.7 + 3) * 600, on: wh(i * 2.3 + 1) < 0.55,
+           h: 60 + wh(i * 3.9 + 2) * 80, w: 220 + wh(i * 5.1 + 4) * 160 };
+}
+// Wind striking a ridge rises on the windward slope and tumbles into turbulence on the lee side
+function ridgeLift(x, alt) {
+  const i0 = Math.floor(x / RIDGE_SPACING);
+  let u = 0;
+  for (let i = i0 - 1; i <= i0 + 1; i++) {
+    const r = ridgeAt(i);
+    if (!r.on || alt > r.h * 2.5) continue;
+    const dx = x - r.x, reach = r.w * 0.9;
+    if (Math.abs(dx) > reach) continue;
+    const w = windX(r.h);
+    const hFade = 1 - alt / (r.h * 2.5), xFade = 1 - Math.abs(dx) / reach;
+    if (Math.sign(dx) === -Math.sign(w)) u += Math.abs(w) * 1.5 * hFade * xFade;
+    else u -= Math.abs(w) * 0.5 * hFade * xFade * (0.5 + 0.5 * Math.sin(state.time * 5 + x * 0.3));
+  }
+  return u;
+}
+
+const LAKE_SPACING = 2600;
+function lakeAt(i) {
+  return { x0: i * LAKE_SPACING + 400 + wh(i * 6.1 + 5) * 900, w: 140 + wh(i * 7.3 + 6) * 160, on: wh(i * 8.9 + 7) < 0.6 };
+}
+function lakeAtX(x) {
+  const i = Math.floor((x - 400) / LAKE_SPACING);
+  for (const l of [lakeAt(i), lakeAt(i - 1)]) if (l.on && x >= l.x0 && x <= l.x0 + l.w) return l;
+  return null;
+}
+
+// ---------- Clouds ----------
+const CLOUD_BASE = 300; // cumulus form where thermals reach the condensation level
+
+function makeCumulus(x, seed, size = 1) {
+  return { x, seed, base: CLOUD_BASE + (wh(seed) - 0.5) * 40,
+           w: (80 + wh(seed + 1) * 90) * size, h: (35 + wh(seed + 2) * 45) * size };
+}
+
+// Cumulus capping each active thermal, plus smaller drifting fair-weather clouds
+function cumulusIn(x0, x1) {
+  const out = [];
+  for (let i = Math.floor(x0 / THERMAL_SPACING) - 1; i <= Math.ceil(x1 / THERMAL_SPACING) + 1; i++) {
+    const th = thermalCol(i);
+    if (th.on) out.push(makeCumulus(th.x, i * 1.37));
+  }
+  const S = 520, off = state.cloudOff;
+  for (let j = Math.floor((x0 - off) / S) - 1; j <= Math.ceil((x1 - off) / S) + 1; j++) {
+    if (wh(j * 2.71 + 9) < 0.45) out.push(makeCumulus(j * S + off + wh(j * 1.9) * 200, j * 3.3 + 50, 0.6));
+  }
+  return out;
+}
+
+function insideCloud(x, alt) {
+  return cumulusIn(x - 200, x + 200).some(c =>
+    Math.abs(x - c.x) < c.w * 0.4 && alt > c.base && alt < c.base + c.h * 1.2);
+}
+
+function updateGroundPrey(p, dt) {
+  const hdx = p.x - bird.x, hdist = Math.abs(hdx);
+  let vx = p.vx;
+  switch (p.kind) {
+    case 'rabbit':
+      p.hopT += dt;
+      wanderFlip(p, dt);
+      vx = p.vx;
+      break;
+    case 'hare':
+      // Bolts with zig-zag jukes once it sees or hears the bird
+      if (!(p.spookT > 0) && sensed(p, dt)) {
+        p.spookT = 4; p.alertT = 0.8; p.dir = Math.sign(hdx) || 1; p.jukeT = 0.6 + Math.random() * 0.6;
+      }
+      if (p.spookT > 0) {
+        p.spookT -= dt; p.jukeT -= dt;
+        if (p.jukeT <= 0) {
+          p.dir = -p.dir;
+          const away = p.dir === (Math.sign(p.x - bird.x) || 1);
+          p.jukeT = away ? 0.6 + Math.random() * 0.6 : 0.2 + Math.random() * 0.25;
+        }
+        vx = p.dir * 16;
+        p.hopT += dt * 2.5;
+      } else {
+        wanderFlip(p, dt);
+        vx = p.vx; p.hopT += dt;
+      }
+      break;
+    case 'mouse':
+      p.pauseT -= dt;
+      if (p.pauseT <= 0) {
+        p.moving = !p.moving;
+        p.pauseT = p.moving ? 0.3 + Math.random() * 0.8 : 0.5 + Math.random() * 1.5;
+        if (p.moving && Math.random() < 0.5) p.vx *= -1;
+      }
+      vx = p.moving ? p.vx : 0;
+      if (p.moving) p.hopT += dt;
+      break;
+    case 'squirrel': {
+      if (p.hidden) {
+        p.hideT -= dt;
+        if (p.hideT <= 0 && hdist > 60) p.hidden = false;
+        return;
+      }
+      if (!p.fleeing && sensed(p, dt)) { p.fleeing = true; p.alertT = 0.8; }
+      if (p.fleeing) {
+        const d = p.home - p.x;
+        if (Math.abs(d) < 0.5) { p.hidden = true; p.fleeing = false; p.hideT = 5; p.x = p.home; return; }
+        vx = Math.sign(d) * Math.min(9, Math.abs(d) / dt);
+        p.hopT += dt * 2;
+      } else {
+        if (Math.abs(p.x - p.wanderX) > 10) p.vx = Math.sign(p.wanderX - p.x) * 2;
+        else wanderFlip(p, dt);
+        vx = p.vx; p.hopT += dt;
+      }
+      break;
+    }
+    case 'turtle':
+      p.hopT += dt;
+      break;
+  }
+  if (vx !== 0) p.face = vx;
+  p.x += vx * dt;
+}
+
+function spookAir(p) {
+  p.spookT = 3; p.alertT = 0.8;
+  p.vx = (Math.sign(p.x - bird.x) || 1) * Math.abs(p.vx);
+  if (p.kind === 'swift') p.h = Math.atan2(p.alt - bird.alt, p.x - bird.x);
+}
+
+function updateAirPrey(p, dt) {
+  const s = SPECIES[p.kind];
+  p.t += dt; p.spookT -= dt;
+  p.flapT += dt * (p.kind === 'duck' ? 18 : p.kind === 'swift' ? 9 : 13);
+  if (p.sitting) {
+    // Paddling on the lake until something gives you away
+    p.flapT = 0; p.alt = 0.4; p.vy = 0;
+    if (p.x < p.lake.x0 + 5) p.vx = Math.abs(p.vx);
+    if (p.x > p.lake.x0 + p.lake.w - 5) p.vx = -Math.abs(p.vx);
+    p.x += p.vx * dt;
+    if (sensed(p, dt)) {
+      p.sitting = false; p.alertT = 0.8; p.spookT = 2;
+      p.vx = (Math.sign(p.x - bird.x) || 1) * s.speed * 0.6; p.vy = 8;
+    }
+    return;
+  }
+  if (p.kind === 'pigeon' || p.kind === 'duck') {
+    if (p.spookT <= 0 && sensed(p, dt)) spookAir(p);
+    const target = (p.spookT > 0 ? 1.5 : 1) * s.speed;
+    p.vx = Math.sign(p.vx) * (Math.abs(p.vx) + (target - Math.abs(p.vx)) * Math.min(1, dt * 2));
+    p.vy = p.spookT > 0 ? 4 : (p.baseAlt - p.alt) * 0.5 + Math.sin(p.t * 1.3) * 1.2;
+  } else if (p.kind === 'swift') {
+    p.turnT -= dt;
+    if (p.spookT <= 0 && sensed(p, dt)) { spookAir(p); p.spookT = 1; }
+    else if (p.turnT <= 0) { p.h += randDir() * (0.8 + Math.random() * 0.8); p.turnT = 0.4 + Math.random() * 0.6; }
+    if ((p.alt < s.alt[0] && Math.sin(p.h) < 0) || (p.alt > s.alt[1] && Math.sin(p.h) > 0)) p.h = -p.h;
+    p.vx = Math.cos(p.h) * s.speed;
+    p.vy = Math.sin(p.h) * s.speed;
+  } else if (p.kind === 'flock') {
+    p.vy = (p.baseAlt - p.alt) * 0.3 + Math.sin(p.t * 0.5) * 2;
+    if (!p.combo && p.scatterT <= 0 && sensed(p, dt)) {
+      p.scatterT = 3; p.alertT = 0.8;
+      for (const m of p.members) {
+        const a = Math.atan2(m.oy, m.ox) + (Math.random() - 0.5);
+        m.svx = Math.cos(a) * 14; m.svy = Math.sin(a) * 14;
+      }
+    }
+    p.scatterT -= dt;
+    const damp = 1 - Math.min(1, dt * 0.8), regroup = 1 - Math.min(1, dt * 0.6);
+    for (const m of p.members) {
+      m.ph += dt * (1.2 + m.r * 0.2);
+      m.dx += m.svx * dt; m.dy += m.svy * dt;
+      m.svx *= damp; m.svy *= damp;
+      if (p.scatterT <= 0) { m.dx *= regroup; m.dy *= regroup; }
+      m.x = p.x + m.ox + Math.cos(m.ph) * m.r * 2 + m.dx;
+      m.alt = Math.max(2, p.alt + m.oy + Math.sin(m.ph * 1.3) * m.r + m.dy);
+    }
+    if (p.members.every(m => m.caught)) p.gone = true;
+    if (p.combo && !p.spent && (p.combo.t -= dt) <= 0) { p.spent = true; p.fadeT = 1; }
+  }
+  if (p.spent && (p.fadeT -= dt) <= 0) p.gone = true;
+  p.x += (p.vx + windX(p.alt)) * dt;
+  p.alt = Math.max(3, p.alt + p.vy * dt);
+}
+
+// Closest approach between a point and the bird's path during this frame
+function sweptDist(px, palt, dt) {
+  const x0 = bird.x - bird.vx * dt, a0 = bird.alt - bird.vy * dt;
+  const sx = bird.x - x0, sa = bird.alt - a0;
+  const len2 = sx * sx + sa * sa || 1;
+  const u = Math.max(0, Math.min(1, ((px - x0) * sx + (palt - a0) * sa) / len2));
+  return Math.hypot(px - (x0 + sx * u), palt - (a0 + sa * u));
+}
+
+function award(entry, pts, msg) {
+  const e = { ...entry, pts, t: state.time };
+  state.score += pts;
+  state.catches++;
+  state.catchLog.push(e);
+  state.lastCatch = e;
+  state.msg = `${msg} +${pts}`;
+  state.msgT = 2;
+  return e;
+}
+
+function checkCatch(p, dt) {
+  const s = SPECIES[p.kind];
+  if (p.spent) return;
+  if (p.failCD > 0) { p.failCD -= dt; return; }
+  if (!s.air) {
+    if (p.hidden) return;
+    const dx = p.x - bird.x, prevDx = dx + bird.vx * dt;
+    const crossed = Math.sign(dx) !== Math.sign(prevDx);
+    if (!((Math.abs(dx) < s.radius || crossed) && bird.alt < s.catchAlt)) return;
+    if (p.kind === 'turtle') {
+      p.gone = true;
+      bird.carrying = { kind: 'turtle' };
+      state.msg = 'Got the turtle! Drop it hard enough to crack the shell';
+      state.msgT = 3;
+      return;
+    }
+    p.gone = true;
+    const minAlt = Math.min(bird.passMin, bird.alt);
+    const pts = Math.round(s.pts + bird.speed * 10 + (1 - minAlt / s.catchAlt) * 200);
+    award({ kind: p.kind, speed: bird.speed, minAlt }, pts, `${s.name}!`);
+    return;
+  }
+  const r = Math.max(3, 22 / cam.zoom);
+  const strike = bird.speed;
+  // Points reward the angle of attack: relative speed between you and the prey
+  const closing = Math.hypot(bird.vx - p.vx - windX(p.alt), bird.vy - p.vy);
+  const targets = p.kind === 'flock' ? p.members.filter(m => !m.caught) : [p];
+  for (const tgt of targets) {
+    if (sweptDist(tgt.x, tgt.alt, dt) > r) continue;
+    if (strike < s.minStrike || closing < s.minRel) {
+      if (p.combo) continue;
+      p.failCD = 1.5;
+      if (p.kind === 'flock') p.scatterT = 0;
+      else { spookAir(p); p.spent = true; p.fadeT = 1.5; } // escaped for good: flees and fades out
+      state.msg = strike < s.minStrike
+        ? `Too slow — ${s.name} escaped (${(strike * 3.6).toFixed(0)} km/h, need ${(s.minStrike * 3.6).toFixed(0)})`
+        : `Bad angle — ${s.name} escaped (relative ${(closing * 3.6).toFixed(0)} km/h, need ${(s.minRel * 3.6).toFixed(0)})`;
+      state.msgT = 2;
+      return;
+    }
+    if (p.kind === 'flock') {
+      tgt.caught = true;
+      if (!p.combo) {
+        // First catch scatters the flock for good; grab more before they're gone
+        const pts = Math.round(s.pts + closing * 10);
+        const entry = award({ kind: 'flock', speed: bird.speed, rel: closing, alt: tgt.alt, air: true, count: 1 }, pts, 'Starling! Grab more');
+        p.combo = { entry, t: STARLING_COMBO_TIME };
+        p.scatterT = Infinity;
+        for (const m of p.members) {
+          const a = Math.atan2(m.oy + m.dy, m.ox + m.dx) + (Math.random() - 0.5);
+          m.svx = Math.cos(a) * 20; m.svy = Math.sin(a) * 20;
+        }
+      } else {
+        const e = p.combo.entry;
+        e.count++; e.pts += STARLING_EXTRA_PTS; e.t = state.time;
+        state.score += STARLING_EXTRA_PTS;
+        state.msg = `Starlings ×${e.count}! +${e.pts}`;
+        state.msgT = 2;
+      }
+      return;
+    }
+    p.gone = true;
+    const pts = Math.round(s.pts + closing * 10);
+    award({ kind: p.kind, speed: bird.speed, rel: closing, alt: tgt.alt, air: true }, pts, `${s.name}!`);
+    return;
+  }
+}
+
+// Release velocity: the bird's own, plus (when aimed) a push toward the cursor
+function throwVelocity(aimed) {
+  let vx = bird.vx, vy = bird.vy;
+  if (aimed) {
+    const ax = cam.x + (mouse.x - W / 2) / cam.zoom - bird.x;
+    const ay = cam.alt + (H / 2 - mouse.y) / cam.zoomY - bird.alt;
+    const d = Math.hypot(ax, ay) || 1, push = Math.min(TURTLE_THROW, d * 0.2);
+    vx += (ax / d) * push; vy += (ay / d) * push;
+  }
+  return { vx, vy };
+}
+
+function dropTurtle(aimed = false) {
+  if (!bird.carrying || state.over || paused) return;
+  const { vx, vy } = throwVelocity(aimed);
+  const target = aimed ? pickThrowTarget(simulateThrow(bird.x, bird.alt, vx, vy)) : null;
+  state.fallers.push({ x: bird.x, alt: bird.alt, vx, vy, dropAlt: bird.alt, spin: 0, target });
+  bird.carrying = null;
+}
+
+// Same integration as a real falling turtle (gravity + drifting toward the wind), sampled for the aim preview
+function simulateThrow(x, alt, vx, vy) {
+  const pts = [{ x, alt }], step = 1 / 30;
+  for (let i = 0; i < 600 && alt > 0; i++) {
+    vy -= G * step;
+    vx += (windX(alt) - vx) * Math.min(1, step * 0.2);
+    x += vx * step; alt += vy * step;
+    pts.push({ x, alt: Math.max(0, alt) });
+  }
+  return pts;
+}
+
+// Animal the throw is lined up on: a ground animal near the landing spot, or a flier close to the arc
+function pickThrowTarget(path) {
+  const end = path[path.length - 1];
+  let best = null, bestD = Infinity;
+  for (const p of prey) {
+    if (p.gone || p.hidden || p.spent || p.kind === 'turtle') continue;
+    let d;
+    if (SPECIES[p.kind].air && !p.sitting) {
+      d = Infinity;
+      for (let i = 0; i < path.length; i += 3) d = Math.min(d, Math.hypot(path[i].x - p.x, path[i].alt - p.alt));
+      if (d > THROW_LOCK_AIR) continue;
+    } else {
+      d = Math.abs(p.x - end.x);
+      if (d > THROW_LOCK_GROUND) continue;
+    }
+    if (d < bestD) { bestD = d; best = p; }
+  }
+  return best;
+}
+
+// Ground impact speed of something released here, from energy: horizontal speed plus vertical gained over the fall
+const predictImpact = (alt, vx, vy) => Math.hypot(vx, Math.sqrt(vy * vy + 2 * G * Math.max(0, alt)));
+
+const ACH_KEY = 'falconDive.achievements';
+function unlockAchievement(id, text) {
+  let got = {};
+  try { got = JSON.parse(localStorage.getItem(ACH_KEY)) || {}; } catch { /* storage unavailable */ }
+  const first = !got[id];
+  got[id] = true;
+  try { localStorage.setItem(ACH_KEY, JSON.stringify(got)); } catch { /* storage unavailable */ }
+  state.toast = { text: `${first ? 'Secret achievement unlocked' : 'Achievement'}: ${text}`, t: 4 };
+}
+
+// A falling turtle that lands on (or passes through) another animal takes it out
+function turtleStrike(p, member, f) {
+  const s = SPECIES[p.kind];
+  if (p.kind === 'flock') member.caught = true; else p.gone = true;
+  const impact = Math.hypot(f.vx, f.vy);
+  f.struck = true;
+  const pts = Math.round(s.pts * 2 + 500 + impact * 5);
+  award({ kind: p.kind, speed: impact, turtleHit: true, air: s.air, alt: member.alt ?? 0, minAlt: 0 }, pts, `TURTLE STRIKE! ${s.name}`);
+  unlockAchievement('aeschylus', 'Aeschylus — hit prey with a falling turtle');
+  for (let i = 0; i < 20; i++) particles.push({
+    x: member.x ?? p.x, alt: Math.max(0.5, member.alt ?? 0.5), vx: (Math.random() - 0.5) * 16, vy: Math.random() * 10, life: 1
+  });
+}
+
+function updateFallers(dt) {
+  for (const f of state.fallers) {
+    f.vy -= G * dt;
+    f.vx += (windX(f.alt) - f.vx) * Math.min(1, dt * 0.2);
+    // Gentle homing on the animal that was locked when thrown
+    if (f.target && !f.target.gone && !f.target.hidden) {
+      const tAlt = SPECIES[f.target.kind].air ? f.target.alt : 0;
+      const drop = f.alt - tAlt;
+      if (drop > 0) {
+        const tRem = (f.vy + Math.sqrt(f.vy * f.vy + 2 * G * drop)) / G;
+        const wantVx = (f.target.x - f.x) / Math.max(0.3, tRem) + (f.target.vx || 0) * 0.5;
+        f.vx += Math.max(-TURTLE_HOMING, Math.min(TURTLE_HOMING, (wantVx - f.vx) * 2)) * dt;
+      }
+    }
+    f.x += f.vx * dt; f.alt += f.vy * dt; f.spin += dt * 5;
+    for (const p of prey) {
+      if (p.gone || p.spent || !SPECIES[p.kind].air) continue;
+      const targets = p.kind === 'flock' ? p.members.filter(m => !m.caught) : [p];
+      for (const t of targets) if (Math.hypot(t.x - f.x, t.alt - f.alt) < 3) turtleStrike(p, t, f);
+    }
+    if (f.alt > 0) continue;
+    f.done = true;
+    for (const p of prey) {
+      if (p.gone || p.hidden || SPECIES[p.kind].air || p.kind === 'turtle') continue;
+      if (Math.abs(p.x - f.x) < 3) turtleStrike(p, p, f);
+    }
+    const impact = Math.hypot(f.vx, f.vy);
+    if (impact >= SHELL_CRACK_SPEED) {
+      const pts = Math.round(SPECIES.turtle.pts + (impact - SHELL_CRACK_SPEED) * 20);
+      award({ kind: 'turtle', speed: impact, drop: f.dropAlt }, pts, 'Shell cracked!');
+      for (let i = 0; i < 25; i++) particles.push({
+        x: f.x, alt: 0.5, vx: (Math.random() - 0.5) * 20, vy: Math.random() * 12, life: 1.2
+      });
+    } else {
+      const t = makeGround(f.x, 'turtle');
+      t.failCD = 2;
+      prey.push(t);
+      if (!f.struck) {
+        state.msg = `Hit at ${(impact * 3.6).toFixed(0)} km/h — the turtle walked away (need ${(SHELL_CRACK_SPEED * 3.6).toFixed(0)})`;
+        state.msgT = 2.5;
+      }
+    }
+  }
+  state.fallers = state.fallers.filter(f => !f.done);
+}
+
+// ---------- Rivals ----------
+// Buzzards circle some thermals. Make a kill or carry a turtle nearby and they give chase;
+// if one reaches you it steals the turtle or your most recent catch. Outfly them in a dive.
+const RIVAL_SPEED = 24, STEAL_WINDOW = 6;
+
+function updateRivals(dt) {
+  const i0 = Math.floor(bird.x / THERMAL_SPACING);
+  for (let i = i0 - 2; i <= i0 + 2; i++) {
+    const th = thermalCol(i);
+    if (!th.on || wh(i * 11.1 + 2) > 0.45 || state.rivalSeen[i]) continue;
+    state.rivalSeen[i] = true;
+    const alt = 160 + wh(i * 12.7) * 160;
+    state.rivals.push({ cx: th.x, calt: alt, x: th.x, alt, ang: Math.random() * 6.28, mode: 'circle', t: 0, flapT: 0, vx: 1, vy: 0 });
+  }
+  for (const r of state.rivals) {
+    r.t -= dt; r.flapT += dt * 6;
+    const dx = bird.x - r.x, dy = bird.alt - r.alt, d = Math.hypot(dx, dy);
+    const fresh = state.lastCatch && state.time - state.lastCatch.t < STEAL_WINDOW && !state.lastCatch.stolen;
+    if (r.mode === 'circle' && d < 150 && (bird.carrying || fresh)) {
+      r.mode = 'chase'; r.t = 7; r.alertT = 0.8;
+      state.msg = 'A buzzard is after your prize!'; state.msgT = 2;
+    }
+    if (r.mode === 'chase') {
+      r.vx = dx / (d || 1) * RIVAL_SPEED; r.vy = dy / (d || 1) * RIVAL_SPEED;
+      if (d < 4) {
+        if (bird.carrying) {
+          bird.carrying = null;
+          state.msg = 'A buzzard snatched your turtle!';
+        } else if (fresh) {
+          const e = state.lastCatch;
+          e.stolen = true;
+          state.score -= e.pts;
+          state.catchLog.splice(state.catchLog.indexOf(e), 1);
+          state.msg = `A buzzard stole your ${SPECIES[e.kind].name}! -${e.pts}`;
+        }
+        state.msgT = 2.5;
+        r.mode = 'leave'; r.t = 5;
+      } else if (r.t <= 0 || !(bird.carrying || fresh)) {
+        r.mode = 'return';
+      }
+    } else if (r.mode === 'leave') {
+      r.vx = Math.sign(r.x - bird.x || 1) * RIVAL_SPEED; r.vy = 4;
+      if (r.t <= 0) r.mode = 'return';
+    } else if (r.mode === 'return') {
+      const ex = r.cx + Math.cos(r.ang) * 35 - r.x, ey = r.calt - r.alt, ed = Math.hypot(ex, ey);
+      r.vx = ex / (ed || 1) * RIVAL_SPEED * 0.7; r.vy = ey / (ed || 1) * RIVAL_SPEED * 0.7;
+      if (ed < 5) r.mode = 'circle';
+    } else {
+      r.ang += dt * 0.6;
+      const nx = r.cx + Math.cos(r.ang) * 35, na = r.calt + Math.sin(r.ang * 2) * 6;
+      r.vx = (nx - r.x) / dt; r.vy = (na - r.alt) / dt;
+    }
+    r.x += r.vx * dt; r.alt = Math.max(5, r.alt + r.vy * dt);
+    r.alertT = (r.alertT || 0) - dt;
+  }
+  state.rivals = state.rivals.filter(r => Math.abs(r.x - bird.x) < 3000);
+}
+
+function wrapAngle(a) {
+  while (a > Math.PI) a -= 2 * Math.PI;
+  while (a < -Math.PI) a += 2 * Math.PI;
+  return a;
+}
+
+// ---------- Coordinate helpers ----------
+const toScreenX = x => W / 2 + (x - cam.x) * cam.zoom;
+const toScreenY = alt => H / 2 - (alt - cam.alt) * cam.zoomY;
+
+// ---------- Update ----------
+function update(dt) {
+  if (state.over || paused) return;
+
+  // Steering: turn toward the mouse (relative to the lens when the bird is above the screen)
+  const { x: bx, y: by } = birdAnchor();
+  // Convert screen direction to world direction (vertical axis may be compressed)
+  const target = Math.atan2((by - mouse.y) / cam.zoomY, (mouse.x - bx) / cam.zoom); // up = positive
+  // Effort 0..1: how far the mouse is toward the screen edge in that direction, so every heading
+  // (including straight down) can reach full effort, not just the far corners
+  const mdx = mouse.x - bx, mdy = mouse.y - by;
+  const mouseDist = Math.hypot(mdx, mdy);
+  let edgeDist = Infinity;
+  if (mouseDist > 0) {
+    const ux = mdx / mouseDist, uy = mdy / mouseDist;
+    if (ux > 0) edgeDist = Math.min(edgeDist, (W - bx) / ux);
+    if (ux < 0) edgeDist = Math.min(edgeDist, -bx / ux);
+    if (uy > 0) edgeDist = Math.min(edgeDist, (H - by) / uy);
+    if (uy < 0) edgeDist = Math.min(edgeDist, -by / uy);
+  }
+  const fullEffortDist = Math.max(40, Math.min(edgeDist * 0.8, Math.min(W, H) * 0.4));
+  const effort = Math.max(0.15, Math.min(1, mouseDist / fullEffortDist));
+  bird.effort = effort;
+  const pointingDown = bird.angle < -0.35;
+  // Mouse well above the bird = flap automatically (with hysteresis so shallow climbs can glide);
+  // holding the button always brakes
+  const braking = mouse.down && !bird.brakeLocked;
+  if (braking) {
+    bird.brakeE = Math.max(0, bird.brakeE - dt / BRAKE_DURATION);
+    if (bird.brakeE === 0) bird.brakeLocked = true;
+  } else {
+    bird.brakeE = Math.min(1, bird.brakeE + dt / BRAKE_RECHARGE);
+    if (bird.brakeLocked && bird.brakeE >= BRAKE_UNLOCK) bird.brakeLocked = false;
+  }
+  const flapOn = bird.mode === 'FLAP' ? 0.3 : 0.45;
+  const flapping = !braking && target > flapOn && target < Math.PI - flapOn;
+  const diving = !braking && bird.speed > DIVE_SPEED && pointingDown;
+  // Tucking only pays off level or descending; it fades out by ~15° nose-up
+  const tuck = effort * Math.max(0, Math.min(1, (0.25 - bird.angle) / 0.25));
+  bird.tuck = tuck;
+
+  // Turn rate falls off steeply with speed; braking restores agility
+  let turnRate = Math.min(3, Math.max(0.25, 3 * Math.pow(22 / Math.max(bird.speed, 22), 1.6)));
+  if (!braking && !flapping) turnRate *= 1.3 - tuck * 0.5; // tucked wings turn worse
+  if (braking) turnRate *= 4;
+  // Ground effect: easier to level out when close to the ground
+  if (bird.alt < 25 && bird.angle < 0) turnRate *= 2;
+
+  let dragK = braking ? BRAKE_DRAG : DRAG * (1.6 - tuck * 0.8);
+  if (bird.carrying) dragK *= 1.3;
+  let sink = 0;
+  if (bird.alt > MAX_ALT) {
+    // Above the ceiling: free flight under gravity, and the bird turns to face its velocity
+    let bvx = Math.cos(bird.angle) * bird.speed, bvy = Math.sin(bird.angle) * bird.speed;
+    bvy -= G * dt;
+    const keep = 1 - Math.min(1, dragK * ABOVE_CEILING_DRAG * bird.speed * dt);
+    bvx *= keep; bvy *= keep;
+    bird.speed = Math.max(0.5, Math.hypot(bvx, bvy));
+    bird.angle = Math.atan2(bvy, bvx);
+  } else {
+    const diff = wrapAngle(target - bird.angle);
+    bird.angle = wrapAngle(bird.angle + Math.sign(diff) * Math.min(Math.abs(diff), turnRate * dt));
+
+    // Along-path physics
+    let accel = -G * Math.sin(bird.angle);           // gravity along heading
+    accel -= dragK * bird.speed * bird.speed;
+    const thinAir = Math.max(0, Math.min(1, (MAX_ALT - bird.alt) / 50));
+    // Climbing steeply: weaker net thrust and a lower speed ceiling
+    const climb = Math.max(0, Math.sin(bird.angle));
+    const flapMax = FLAP_MAX_SPEED - 20 * climb;
+    if (flapping && bird.speed < flapMax) {
+      const taper = Math.min(1, (flapMax - bird.speed) / 5);
+      accel += FLAP_THRUST * (1 - 0.4 * climb) * (0.4 + 0.6 * effort) * thinAir * taper * (bird.carrying ? 0.6 : 1);
+    }
+    bird.speed = Math.max(2, bird.speed + accel * dt);
+
+    // Stall: sink when too slow; a carried turtle adds weight
+    if (bird.speed < STALL_SPEED) sink = (STALL_SPEED - bird.speed) * 1.2;
+    if (bird.carrying) sink += 1.5;
+  }
+
+  // Air-relative velocity plus wind and thermal lift gives ground velocity
+  const vx = Math.cos(bird.angle) * bird.speed;
+  const vy = Math.sin(bird.angle) * bird.speed - sink;
+  updateWind(dt);
+  const gvx = vx + windX(bird.alt), gvy = vy + updraft(bird.x, bird.alt);
+  bird.x += gvx * dt;
+  bird.alt += gvy * dt;
+
+  bird.mode = braking ? 'BRAKE' : diving ? 'DIVE' : flapping ? 'FLAP' : bird.speed < STALL_SPEED ? 'STALL' : 'GLIDE';
+  const prevBeat = Math.floor(bird.flapT / (Math.PI * 2));
+  bird.flapT += dt * (flapping ? 14 : 0);
+  // Sound rings: one per wingbeat while flapping, a steady hiss while braking, wind roar in a fast dive
+  state.ringT = (state.ringT || 0) - dt;
+  const roar = !flapping && !braking && diveNoise() > 12;
+  if ((flapping && Math.floor(bird.flapT / (Math.PI * 2)) !== prevBeat) || ((braking || roar) && state.ringT <= 0)) {
+    state.rings.push({ x: bird.x, alt: bird.alt, t: 0, r: hearingRange(), kind: flapping ? 'flap' : braking ? 'brake' : 'wind' });
+    state.ringT = roar ? 0.25 : 0.35;
+  }
+  bird.vx = gvx; bird.vy = gvy;
+  state.maxSpeed = Math.max(state.maxSpeed, bird.speed);
+
+  if (braking && bird.speed > 25 && Math.random() < 0.5) {
+    particles.push({ x: bird.x, alt: bird.alt, vx: -vx * 0.1, vy: -vy * 0.1, life: 0.6 });
+  }
+
+  // Ground contact
+  if (bird.alt <= 0) {
+    if (-bird.vy > SAFE_VSPEED) {
+      state.over = true;
+      state.msg = `CRASHED at ${(bird.speed * 3.6).toFixed(0)} km/h — click to retry`;
+      for (let i = 0; i < 40; i++) particles.push({
+        x: bird.x, alt: 0, vx: (Math.random() - 0.5) * 30, vy: Math.random() * 20, life: 1.5
+      });
+      bird.alt = 0;
+      return;
+    }
+    bird.alt = 0;
+    if (bird.angle < 0) bird.angle = 0; // skim along the ground
+  }
+
+  state.time += dt;
+  state.fog += ((insideCloud(bird.x, bird.alt) ? 1 : 0) - state.fog) * Math.min(1, dt * 3);
+  // Lowest altitude in the current low pass; resets once you climb away
+  bird.passMin = bird.alt > 30 ? Infinity : Math.min(bird.passMin, bird.alt);
+
+  // Wake samples that push the grass aside behind a low-flying bird
+  state.wakeT -= dt;
+  if (bird.alt < 6 && state.wakeT <= 0) {
+    state.wake.push({ x: bird.x, t: state.time, s: (1 - bird.alt / 6) * Math.min(1, bird.speed / 20) });
+    state.wakeT = 0.04;
+  }
+  state.wake = state.wake.filter(w => state.time - w.t < 1.5);
+
+  // Prey
+  for (const p of prey) {
+    if (SPECIES[p.kind].air) updateAirPrey(p, dt); else updateGroundPrey(p, dt);
+    if (SENSES[p.kind]) updateLook(p, dt);
+    p.alertT -= dt;
+    if (!bird.carrying && !p.gone) checkCatch(p, dt);
+  }
+  updateFallers(dt);
+  updateWeather(dt);
+  updateRivals(dt);
+  spawnPreyAhead();
+
+  // Particles
+  for (const pt of particles) {
+    pt.x += pt.vx * dt; pt.alt += pt.vy * dt; pt.vy -= G * dt * 0.5; pt.life -= dt;
+  }
+  particles = particles.filter(p => p.life > 0);
+  for (const r of state.rings) r.t += dt;
+  state.rings = state.rings.filter(r => r.t < 0.8);
+  state.msgT -= dt;
+  if (state.toast) state.toast.t -= dt;
+
+  // Camera: ground pinned near the bottom; zoom tighter when low/slow, capped at the ZOOM_CAP_ALT view.
+  // Above that, the vertical axis compresses so the bird and ground both stay on screen.
+  const usable = H - groundPx() - VIEW_MARGIN;
+  const capZoom = usable / (ZOOM_CAP_ALT + 15);
+  const fitZoom = usable / Math.min(bird.alt * 1.15 + 10, MAX_ALT + 15);
+  const speedZoom = 120 / (1 + bird.speed / 10);
+  const targetZoom = Math.max(capZoom, Math.min(speedZoom, fitZoom));
+  cam.gz += (targetZoom - cam.gz) * Math.min(1, dt * 1.5);
+  cam.gz = Math.max(capZoom, Math.min(cam.gz, fitZoom));
+  const gzY = Math.min(cam.gz, fitZoom);
+  const leadX = Math.max(-W * 0.3, Math.min(W * 0.3, bird.vx * 0.8 * cam.gz)) / cam.gz;
+  let zoom = cam.gz, zoomY = gzY, camX = bird.x + leadX, camAlt = (H / 2 - groundPx()) / gzY;
+
+  // Air chase: frame the bird and nearby flying targets, even if the ground leaves the screen.
+  // Several close birds are blended by closeness so the framing doesn't jump between them.
+  let tgt = null, td = AIR_FOCUS_DIST, wSum = 0, wx = 0, walt = 0, spread = 0;
+  const near = [];
+  for (const p of prey) {
+    if (!SPECIES[p.kind].air || p.gone || p.spent || p.sitting) continue;
+    const d = Math.hypot(p.x - bird.x, p.alt - bird.alt);
+    if (d >= AIR_FOCUS_DIST) continue;
+    if (d < td) { td = d; tgt = p; }
+    const w = 1 - d / AIR_FOCUS_DIST;
+    wSum += w; wx += p.x * w; walt += p.alt * w;
+    near.push(p);
+  }
+  const want = tgt && !bird.carrying && bird.alt <= MAX_ALT ? Math.min(1, (AIR_FOCUS_DIST - td) / 30) : 0;
+  // Ease in quickly, but let go slowly so losing a target doesn't snap the zoom out
+  cam.focus += (want - cam.focus) * Math.min(1, dt * (want > cam.focus ? 2 : 0.6));
+  cam.tgt = want > 0 ? tgt : null;
+  if (wSum > 0) {
+    const cx = wx / wSum, calt = walt / wSum;
+    const mx = (bird.x + cx) / 2, malt = (bird.alt + calt) / 2;
+    spread = Math.hypot(bird.x - mx, bird.alt - malt);
+    for (const p of near) spread = Math.max(spread, Math.hypot(p.x - mx, p.alt - malt));
+    const k = Math.min(1, dt * 3);
+    if (!cam.ft) cam.ft = { x: mx, alt: malt, r: spread };
+    cam.ft.x += (mx - cam.ft.x) * k; cam.ft.alt += (malt - cam.ft.alt) * k; cam.ft.r += (spread - cam.ft.r) * k;
+  }
+  if (cam.focus > 0.001 && cam.ft) {
+    const az = Math.min(15, (Math.min(W, H) * 0.15) / Math.max(cam.ft.r * 2, 6));
+    const f = cam.focus;
+    zoom = lerp(zoom, az, f); zoomY = lerp(zoomY, az, f);
+    camX = lerp(camX, cam.ft.x, f);
+    camAlt = lerp(camAlt, cam.ft.alt, f);
+  }
+  // Near the ground, the ground always stays in frame (blends in below 80 m, fully by 40 m)
+  const keepGround = Math.max(0, Math.min(1, (80 - bird.alt) / 40));
+  if (keepGround > 0) {
+    zoom = lerp(zoom, Math.min(zoom, fitZoom), keepGround);
+    zoomY = lerp(zoomY, Math.min(zoomY, fitZoom), keepGround);
+    camAlt = lerp(camAlt, Math.min(camAlt, (H / 2 - groundPx()) / zoomY), keepGround);
+  }
+  cam.zoom = zoom; cam.zoomY = zoomY; cam.alt = camAlt;
+  cam.x += (camX - cam.x) * Math.min(1, dt * 3);
+  cam.shake = Math.max(0, (bird.speed - 50) / 45) * 4 + (braking ? 3 : 0);
+}
+
+// ---------- Draw ----------
+const OUTLINE = 'drop-shadow(1px 0 0 #000) drop-shadow(-1px 0 0 #000) drop-shadow(0 1px 0 #000) drop-shadow(0 -1px 0 #000)';
+const mixRGB = (a, b, k) => a.map((v, i) => Math.round(v + (b[i] - v) * k));
+const rgb = c => `rgb(${c[0]},${c[1]},${c[2]})`;
+
+function drawBackground() {
+  const groundY = toScreenY(0);
+  const t = Math.min(1, Math.max(0, bird.alt) / MAX_ALT);
+  const d = daylight(), tw = twilight();
+  let top = mixRGB([8, 12, 30], [40 - t * 32, 100 - t * 80, 180 - t * 115], d);
+  let bottom = mixRGB([25, 35, 65], [191 - t * 70, 227 - t * 55, 255 - t * 25], d);
+  bottom = mixRGB(bottom, [250, 150, 90], tw * 0.6);
+  top = mixRGB(top, [90, 70, 110], tw * 0.3);
+  const sky = ctx.createLinearGradient(0, 0, 0, Math.max(groundY, 1));
+  sky.addColorStop(0, rgb(top));
+  sky.addColorStop(1, rgb(bottom));
+  ctx.fillStyle = sky;
+  ctx.fillRect(0, 0, W, H);
+
+  // Stars fade in at night
+  if (d < 0.7) {
+    ctx.fillStyle = `rgba(255,255,255,${(0.7 - d) / 0.7 * 0.8})`;
+    for (let i = 0; i < 140; i++) {
+      const sx = hash(i * 1.1) * W, sy = hash(i * 2.3) * (groundY - 120);
+      ctx.fillRect(sx, sy, hash(i * 3.7) < 0.15 ? 2 : 1, 1);
+    }
+  }
+
+  // Moon arcs across the far sky at night (screen space, rising on the left); the sun is off-screen
+  const horizon = groundY - 60, arcH = Math.max(100, horizon - 70);
+  const ph = sunPhase();
+  const sunPos = a => [W * (0.05 + 0.9 * (1 - Math.cos(a)) / 2), horizon - Math.sin(a) * arcH];
+  const mp = ph - Math.PI;
+  if (Math.sin(mp) > -0.15) {
+    const [mx, my] = sunPos(mp);
+    ctx.fillStyle = '#e8ecf5';
+    ctx.beginPath(); ctx.arc(mx, my, 16, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = rgb(top);
+    ctx.beginPath(); ctx.arc(mx + 6, my - 3, 14, 0, Math.PI * 2); ctx.fill();
+  }
+
+  // Sky grid: spacing adapts to zoom like the grass ruler
+  const gx = niceStep(160 / cam.zoom), gy = niceStep(120 / cam.zoomY);
+  const skyBottom = toScreenY(0);
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = 'rgba(210,235,255,0.18)';
+  ctx.beginPath();
+  for (let m = Math.floor((cam.x - W / 2 / cam.zoom) / gx) * gx; m <= cam.x + W / 2 / cam.zoom; m += gx) {
+    const x = Math.round(toScreenX(m)) + 0.5;
+    ctx.moveTo(x, 0); ctx.lineTo(x, skyBottom);
+  }
+  const topAlt = cam.alt + H / 2 / cam.zoomY;
+  for (let a = gy; a <= topAlt; a += gy) {
+    const y = Math.round(toScreenY(a)) + 0.5;
+    ctx.moveTo(0, y); ctx.lineTo(W, y);
+  }
+  ctx.stroke();
+
+  // Cirrus: thin high streaks near and above the ceiling
+  {
+    const S = 380, off = state.cirrusOff, half = W / 2 / cam.zoom + 300;
+    for (let j = Math.floor((cam.x - half - off) / S); j <= Math.ceil((cam.x + half - off) / S); j++) {
+      if (wh(j * 5.5) > 0.6) continue;
+      const x = j * S + off + wh(j * 1.3) * 150, alt = 470 + wh(j * 2.2) * 60;
+      const len = 150 + wh(j * 3.7) * 200, thick = 3 + wh(j * 4.9) * 4;
+      const sx = toScreenX(x), sy = toScreenY(alt);
+      if (sy < -40 || sy > H) continue;
+      ctx.fillStyle = 'rgba(255,255,255,0.22)';
+      ctx.beginPath(); ctx.ellipse(sx, sy, len / 2 * cam.zoom, thick * cam.zoomY + 1, -0.04, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = 'rgba(255,255,255,0.14)';
+      ctx.beginPath(); ctx.ellipse(sx + len * 0.2 * cam.zoom, sy - thick * 2 * cam.zoomY, len * 0.3 * cam.zoom, thick * 0.6 * cam.zoomY + 1, -0.04, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+
+  // Parallax hills
+  ctx.fillStyle = rgb(mixRGB([40, 50, 70], [143, 169, 184], d));
+  ctx.beginPath(); ctx.moveTo(0, H);
+  for (let sx = 0; sx <= W; sx += 20) {
+    const wx = (sx + cam.x * cam.zoom * 0.2) / 200;
+    ctx.lineTo(sx, groundY - 80 - Math.sin(wx) * 40 - Math.sin(wx * 2.3) * 20);
+  }
+  ctx.lineTo(W, H); ctx.fill();
+
+  // Low haze over the horizon
+  const haze = ctx.createLinearGradient(0, groundY - 140, 0, groundY);
+  haze.addColorStop(0, 'rgba(225,238,248,0)');
+  haze.addColorStop(1, 'rgba(225,238,248,0.45)');
+  ctx.fillStyle = haze;
+  ctx.fillRect(0, groundY - 140, W, 140);
+
+  // Ridges just behind the play plane (wind rising over them gives lift on the windward side)
+  const half = W / 2 / cam.zoom;
+  for (let i = Math.floor((cam.x - half - 400) / RIDGE_SPACING) - 1; i <= Math.ceil((cam.x + half + 400) / RIDGE_SPACING) + 1; i++) {
+    const r = ridgeAt(i);
+    if (!r.on) continue;
+    const g = ctx.createLinearGradient(0, toScreenY(r.h), 0, groundY);
+    g.addColorStop(0, rgb(mixRGB([35, 45, 40], [120, 140, 105], d)));
+    g.addColorStop(1, rgb(mixRGB([25, 35, 30], [80, 105, 70], d)));
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.moveTo(toScreenX(r.x - r.w), groundY + 1);
+    for (let k = 0; k <= 40; k++) {
+      const f = k / 40 * 2 - 1;
+      const hgt = r.h * Math.pow((1 + Math.cos(Math.PI * f)) / 2, 1.3) * (0.92 + 0.08 * hash(i * 13 + k));
+      ctx.lineTo(toScreenX(r.x + f * r.w), toScreenY(hgt));
+    }
+    ctx.lineTo(toScreenX(r.x + r.w), groundY + 1);
+    ctx.fill();
+  }
+
+  // Cumulus: flat grey bases, bright puffy tops
+  for (const c of cumulusIn(cam.x - half - 200, cam.x + half + 200)) drawCumulus(c);
+
+  // Ceiling
+  const ceilY = toScreenY(MAX_ALT);
+  if (ceilY > -5) {
+    ctx.strokeStyle = 'rgba(255,255,255,0.5)'; ctx.lineWidth = 1;
+    ctx.setLineDash([8, 8]);
+    ctx.beginPath(); ctx.moveTo(0, ceilY); ctx.lineTo(W, ceilY); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = 'rgba(255,255,255,0.7)'; ctx.font = '11px monospace'; ctx.textAlign = 'center';
+    ctx.fillText(`ceiling ${MAX_ALT} m`, W / 2, ceilY - 4);
+  }
+
+  // Ground
+  ctx.fillStyle = '#5c8a3a';
+  ctx.fillRect(0, groundY, W, H - groundY);
+  ctx.fillStyle = '#4a7230';
+  const step = niceStep(30 / cam.zoom);
+  for (let m = Math.floor((cam.x - W / cam.zoom) / step) * step; m < cam.x + W / cam.zoom; m += step) {
+    ctx.fillRect(toScreenX(m), groundY, 2, 6);
+  }
+
+  // Lakes
+  for (let i = Math.floor((cam.x - half - 400) / LAKE_SPACING) - 1; i <= Math.ceil((cam.x + half) / LAKE_SPACING) + 1; i++) {
+    const l = lakeAt(i);
+    if (!l.on) continue;
+    const x0 = toScreenX(l.x0), x1 = toScreenX(l.x0 + l.w);
+    if (x1 < 0 || x0 > W) continue;
+    const wg = ctx.createLinearGradient(0, groundY, 0, H);
+    wg.addColorStop(0, rgb(mixRGB([30, 50, 80], [90, 150, 200], d)));
+    wg.addColorStop(1, rgb(mixRGB([15, 25, 45], [40, 90, 140], d)));
+    ctx.fillStyle = wg;
+    ctx.fillRect(x0, groundY - 1, x1 - x0, H - groundY + 1);
+    ctx.fillStyle = '#7a6a4a';
+    ctx.fillRect(x0 - 3, groundY - 1, 3, 6); ctx.fillRect(x1, groundY - 1, 3, 6);
+    ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.lineWidth = 1;
+    for (let k = 0; k < 12; k++) {
+      const sx = x0 + ((hash(i * 9 + k) * (x1 - x0) + state.time * 8 * (k % 2 ? 1 : -1)) % (x1 - x0) + (x1 - x0)) % (x1 - x0);
+      const sy = groundY + 4 + hash(i * 7 + k) * Math.min(40, H - groundY - 8);
+      ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(sx + 10, sy); ctx.stroke();
+    }
+  }
+
+  // Bird's shadow, cast away from the sun; spreads and fades with height
+  if (!state.over && d > 0.15 && bird.alt < SHADOW_ALT) {
+    const fade = (1 - bird.alt / SHADOW_ALT) * Math.min(1, d * 1.5);
+    const sx = toScreenX(bird.x + shadowOffset(bird.alt));
+    const w = 16 * (1 + bird.alt / 40), h = 4 + bird.alt / 20;
+    ctx.fillStyle = `rgba(0,0,0,${0.3 * fade})`;
+    ctx.beginPath(); ctx.ellipse(sx, groundY + 1, w * 1.4, h * 1.4, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = `rgba(0,0,0,${0.55 * fade})`;
+    ctx.beginPath(); ctx.ellipse(sx, groundY + 1, w, h, 0, 0, Math.PI * 2); ctx.fill();
+  }
+}
+
+// Sun direction marker on the screen edge, along the line from the bird toward the sun
+function drawSunIndicator() {
+  const ph = sunPhase();
+  if (Math.sin(ph) <= 0) return;
+  const { x: bx, y: by } = birdAnchor();
+  const ux = -Math.cos(ph), uy = -Math.sin(ph), inset = 26;
+  let t = Infinity;
+  if (ux > 0) t = Math.min(t, (W - inset - bx) / ux);
+  if (ux < 0) t = Math.min(t, (inset - bx) / ux);
+  if (uy < 0) t = Math.min(t, (inset - by) / uy);
+  if (uy > 0) t = Math.min(t, (H - inset - by) / uy);
+  const x = bx + ux * t, y = by + uy * t;
+  ctx.strokeStyle = '#ffd34d'; ctx.fillStyle = '#ffd34d'; ctx.lineWidth = 2;
+  ctx.globalAlpha = 0.85;
+  ctx.beginPath(); ctx.arc(x, y, 8, 0, Math.PI * 2); ctx.fill();
+  for (let k = 0; k < 8; k++) {
+    const a = (k / 8) * Math.PI * 2;
+    ctx.beginPath(); ctx.moveTo(x + Math.cos(a) * 11, y + Math.sin(a) * 11); ctx.lineTo(x + Math.cos(a) * 16, y + Math.sin(a) * 16); ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawCumulus(c) {
+  const left = toScreenX(c.x - c.w * 0.7), right = toScreenX(c.x + c.w * 0.7);
+  if (right < 0 || left > W) return;
+  const path = new Path2D();
+  const n = 7;
+  for (let j = 0; j < n; j++) {
+    const f = j / (n - 1) - 0.5;
+    const pr = c.h * (0.45 + hash(c.seed + j * 0.37) * 0.4) * (1 - Math.abs(f) * 0.8);
+    const sx = toScreenX(c.x + f * c.w * 0.85), sy = toScreenY(c.base + pr * 0.85);
+    const rx = pr * 1.3 * cam.zoom, ry = pr * cam.zoomY;
+    path.moveTo(sx + rx, sy);
+    path.ellipse(sx, sy, rx, ry, 0, 0, Math.PI * 2);
+  }
+  const top = toScreenY(c.base + c.h * 1.6), baseY = toScreenY(c.base);
+  ctx.save();
+  ctx.clip(path);
+  const g = ctx.createLinearGradient(0, top, 0, baseY);
+  g.addColorStop(0, 'rgba(255,255,255,0.95)');
+  g.addColorStop(0.65, 'rgba(242,246,251,0.93)');
+  g.addColorStop(1, 'rgba(185,197,214,0.93)');
+  ctx.fillStyle = g;
+  // Only fill above the base, which gives the flat cumulus underside
+  ctx.fillRect(left, top, right - left, baseY - top);
+  ctx.restore();
+}
+
+function niceStep(minMetres) {
+  for (const s of [0.5, 1, 2, 5, 10, 25, 50, 100, 250]) if (s >= minMetres) return s;
+  return 500;
+}
+
+const facing = p => ((p.face ?? p.vx) < 0 ? -1 : 1);
+
+function drawLeporid(x, y, p, s, body, earH) {
+  const hop = Math.abs(Math.sin(p.hopT * 6)) * 4;
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.scale(facing(p) * s, s);
+  ctx.translate(0, -hop);
+  ctx.fillStyle = body;
+  ctx.beginPath(); ctx.ellipse(0, -5, 8, 5, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(7, -9, 4, 3.5, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.fillRect(6, -10 - earH, 2, earH);
+  ctx.fillStyle = '#fff';
+  ctx.beginPath(); ctx.arc(-8, -5, 2.5, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+}
+
+function drawMouse(x, y, p, s) {
+  const bob = p.moving ? Math.abs(Math.sin(p.hopT * 18)) * 0.8 : 0;
+  ctx.save();
+  ctx.translate(x, y - bob);
+  ctx.scale(facing(p) * s, s);
+  ctx.strokeStyle = '#8a7f78'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(-5, -2); ctx.quadraticCurveTo(-9, -4, -12, -1); ctx.stroke();
+  ctx.fillStyle = '#8a8580';
+  ctx.beginPath(); ctx.ellipse(0, -2.5, 5, 2.5, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(5, -3, 2.6, 2, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#c9a9a0';
+  ctx.beginPath(); ctx.arc(4, -5.2, 1.5, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+}
+
+function drawSquirrel(x, y, p, s) {
+  const hop = Math.abs(Math.sin(p.hopT * 8)) * 3;
+  ctx.save();
+  ctx.translate(x, y - hop);
+  ctx.scale(facing(p) * s, s);
+  ctx.fillStyle = '#b5653a';
+  ctx.beginPath(); ctx.ellipse(-7, -11, 4, 7.5, -0.4, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#9a5530';
+  ctx.beginPath(); ctx.ellipse(0, -5, 6, 4, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(6, -8, 3.2, 3, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(5, -10); ctx.lineTo(6, -13.5); ctx.lineTo(7.5, -10.5); ctx.fill();
+  ctx.restore();
+}
+
+function drawTurtle(x, y, p, s, rot = 0) {
+  const step = Math.sin((p.hopT || 0) * 6);
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(rot);
+  ctx.scale(facing(p) * s, s);
+  ctx.fillStyle = '#7a9a3a';
+  ctx.fillRect(-6 + step, -3, 3, 3); ctx.fillRect(3 - step, -3, 3, 3);
+  ctx.beginPath(); ctx.arc(9, -4, 2.5, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#4e6b2f';
+  ctx.beginPath(); ctx.ellipse(0, -3, 8.5, 6, 0, Math.PI, 0); ctx.fill();
+  ctx.strokeStyle = '#7f9c4a'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(-4, -3); ctx.lineTo(-2, -7); ctx.lineTo(2, -7); ctx.lineTo(4, -3); ctx.stroke();
+  ctx.restore();
+}
+
+function drawPigeon(x, y, p, s, duck = false) {
+  const f = Math.sin(p.flapT || 0);
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.scale(facing(p) * s, s);
+  ctx.fillStyle = duck ? '#7a5a3a' : '#8d97a5';
+  ctx.beginPath(); ctx.moveTo(-7, 0); ctx.lineTo(-13, -2); ctx.lineTo(-13, 2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(0, 0, duck ? 9 : 8, duck ? 4.5 : 4, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = duck ? '#2e6b3a' : '#6e7886';
+  ctx.beginPath(); ctx.arc(duck ? 9 : 8, -2, 3, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = duck ? '#e0a030' : '#444';
+  const bx = duck ? 11.5 : 10.5;
+  ctx.beginPath(); ctx.moveTo(bx, -2.5); ctx.lineTo(bx + (duck ? 3.5 : 2.5), -1.5); ctx.lineTo(bx, -0.5); ctx.fill();
+  ctx.fillStyle = duck ? '#5a4630' : '#737d8b';
+  ctx.beginPath(); ctx.moveTo(4, -1); ctx.lineTo(-3, -1 - f * 10); ctx.lineTo(-6, -1); ctx.closePath(); ctx.fill();
+  ctx.restore();
+}
+
+function drawSwift(x, y, p, s) {
+  const w = 0.55 + 0.45 * Math.sin(p.flapT || 0);
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.scale(facing(p) * s, s);
+  ctx.fillStyle = '#2a2a30';
+  ctx.beginPath(); ctx.ellipse(0, 0, 6, 2, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(-5, 0); ctx.lineTo(-11, -2.5); ctx.lineTo(-8.5, 0); ctx.lineTo(-11, 2.5); ctx.fill();
+  for (const sgn of [-1, 1]) {
+    ctx.beginPath(); ctx.moveTo(2, 0);
+    ctx.quadraticCurveTo(-2, sgn * 7 * w, -10, sgn * 9 * w);
+    ctx.quadraticCurveTo(-3, sgn * 3 * w, -1, 0);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawStarling(x, y, flap, s, dir) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.scale(dir < 0 ? -s : s, s);
+  ctx.fillStyle = '#26262c';
+  ctx.beginPath(); ctx.ellipse(0, 0, 3.2, 1.6, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(1, 0); ctx.lineTo(-2, -4 * Math.sin(flap)); ctx.lineTo(-3, 0); ctx.fill();
+  ctx.restore();
+}
+
+// y is the ground line for ground species, the body centre for flying ones
+function drawSpecies(kind, x, y, p, s) {
+  switch (kind) {
+    case 'rabbit': return drawLeporid(x, y, p, s, '#8b6b4a', 8);
+    case 'hare': return drawLeporid(x, y, p, s, '#b08a5a', 13);
+    case 'mouse': return drawMouse(x, y, p, s);
+    case 'squirrel': return drawSquirrel(x, y, p, s);
+    case 'turtle': return drawTurtle(x, y, p, s);
+    case 'pigeon': return drawPigeon(x, y, p, s);
+    case 'duck': return drawPigeon(x, y, p, s, true);
+    case 'swift': return drawSwift(x, y, p, s);
+    case 'flock':
+      for (let i = 0; i < 5; i++) {
+        drawStarling(x + ((i % 3) - 1) * 9 * s, y + (i < 3 ? -4 : 5) * s, (p.flapT || 0) + i, s, p.vx ?? 1);
+      }
+  }
+}
+
+function drawAlert(x, y, ch = '!', alpha = 1) {
+  ctx.globalAlpha = alpha;
+  ctx.font = 'bold 18px sans-serif'; ctx.textAlign = 'center';
+  ctx.strokeStyle = '#000'; ctx.lineWidth = 3; ctx.strokeText(ch, x, y);
+  ctx.fillStyle = ch === '!' ? '#ffdd55' : '#fff'; ctx.fillText(ch, x, y);
+  ctx.globalAlpha = 1;
+}
+
+// "!" when spooked, a fading-in "?" while the animal is noticing you
+function drawAwareness(p, x, y) {
+  if (p.alertT > 0) drawAlert(x, y);
+  else if (p.aware > 0 && SENSES[p.kind]) drawAlert(x, y, '?', Math.min(1, 0.3 + p.aware / SENSES[p.kind].reaction));
+}
+
+function drawPrey(p) {
+  const s = SPECIES[p.kind];
+  const sx = toScreenX(p.x);
+  if (sx < -150 || sx > W + 150) return;
+  if (!s.air) {
+    const gy = toScreenY(0);
+    if (p.kind === 'squirrel') {
+      const hx = toScreenX(p.home);
+      ctx.fillStyle = '#6b4f30';
+      ctx.beginPath(); ctx.ellipse(hx, gy, 14, 4.5, 0, Math.PI, 0); ctx.fill();
+      ctx.fillStyle = '#2b1d10';
+      ctx.beginPath(); ctx.ellipse(hx, gy - 0.5, 7, 2.5, 0, 0, Math.PI * 2); ctx.fill();
+      if (p.hidden) return;
+    }
+    drawSprite(p.kind, sx, gy, p, s.scale);
+    drawAwareness(p, sx, gy - 34);
+    return;
+  }
+  if (p.kind === 'flock') {
+    ctx.globalAlpha = p.spent ? Math.max(0, p.fadeT) : 1;
+    for (const m of p.members) {
+      if (!m.caught) drawStarlingSprite(toScreenX(m.x), toScreenY(m.alt), m.ph * 6, s.scale, p.vx);
+    }
+    ctx.globalAlpha = 1;
+  } else {
+    ctx.globalAlpha = p.spent ? Math.max(0, Math.min(1, p.fadeT)) : 1;
+    drawSprite(p.kind, sx, toScreenY(p.alt), p, s.scale);
+    ctx.globalAlpha = 1;
+  }
+  if (!p.combo) drawAwareness(p, sx, toScreenY(p.alt) - 20);
+}
+
+// ---------- Sprite cache ----------
+// Outlined animal sprites are pre-rendered per animation frame; a canvas filter on every draw is far too slow
+const spriteCache = new Map();
+const ANIM_STEPS = 12;
+// Animation period of [hopT, flapT] for each sprite (0 = not animated by that value)
+const ANIM_PERIOD = { rabbit: [Math.PI / 6, 0], hare: [Math.PI / 6, 0], mouse: [Math.PI / 18, 0], squirrel: [Math.PI / 8, 0],
+  turtle: [Math.PI / 3, 0], pigeon: [0, Math.PI * 2], duck: [0, Math.PI * 2], swift: [0, Math.PI * 2], star: [0, Math.PI * 2] };
+function quantize(v, period) {
+  if (!period) return [0, 0];
+  const i = Math.floor(((((v || 0) % period) + period) % period) / period * ANIM_STEPS);
+  return [i, ((i + 0.5) / ANIM_STEPS) * period];
+}
+function renderSprite(s, drawFn) {
+  const size = Math.ceil(64 * s) + 8;
+  const raw = document.createElement('canvas');
+  raw.width = raw.height = size;
+  const saved = ctx;
+  ctx = raw.getContext('2d');
+  ctx.translate(size / 2, size / 2);
+  drawFn();
+  ctx = saved;
+  const out = document.createElement('canvas');
+  out.width = out.height = size;
+  const o = out.getContext('2d');
+  o.filter = OUTLINE;
+  o.drawImage(raw, 0, 0);
+  return out;
+}
+function cached(key, s, drawFn) {
+  let img = spriteCache.get(key);
+  if (!img) { img = renderSprite(s, drawFn); spriteCache.set(key, img); }
+  return img;
+}
+function drawSprite(kind, x, y, p, s) {
+  const [hPer, fPer] = ANIM_PERIOD[kind] || [0, 0];
+  const [hi, hopT] = quantize(p.hopT, hPer), [fi, flapT] = quantize(p.flapT, fPer);
+  const dir = facing(p), moving = p.moving ? 1 : 0;
+  const img = cached(`${kind}|${dir}|${s}|${hi}|${fi}|${moving}`, s,
+    () => drawSpecies(kind, 0, 0, { hopT, flapT, vx: dir, face: dir, moving: !!moving }, s));
+  ctx.drawImage(img, Math.round(x - img.width / 2), Math.round(y - img.height / 2));
+}
+function drawStarlingSprite(x, y, flap, s, dir) {
+  const [fi, f] = quantize(flap, ANIM_PERIOD.star[1]);
+  const d = dir < 0 ? -1 : 1;
+  const img = cached(`star|${d}|${s}|${fi}`, s, () => drawStarling(0, 0, f, s, d));
+  ctx.drawImage(img, Math.round(x - img.width / 2), Math.round(y - img.height / 2));
+}
+
+function drawFallers() {
+  // While aiming (right-click held): the simulated arc, landing spot, and the animal it will home in on
+  if (mouse.aiming && bird.carrying) {
+    const { vx, vy } = throwVelocity(true);
+    const path = simulateThrow(bird.x, bird.alt, vx, vy);
+    const target = pickThrowTarget(path);
+    ctx.setLineDash([4, 6]); ctx.strokeStyle = 'rgba(255,80,60,0.6)'; ctx.lineWidth = 2;
+    ctx.beginPath();
+    path.forEach((pt, i) => (i ? ctx.lineTo : ctx.moveTo).call(ctx, toScreenX(pt.x), toScreenY(pt.alt)));
+    ctx.stroke();
+    ctx.setLineDash([]);
+    const end = path[path.length - 1], lx = toScreenX(end.x), gy = toScreenY(0);
+    ctx.strokeStyle = 'rgba(255,80,60,0.9)';
+    ctx.beginPath(); ctx.ellipse(lx, gy, 12, 4, 0, 0, Math.PI * 2); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(lx - 6, gy - 6); ctx.lineTo(lx + 6, gy + 6); ctx.moveTo(lx + 6, gy - 6); ctx.lineTo(lx - 6, gy + 6); ctx.stroke();
+    if (target) {
+      const tx = toScreenX(target.x), ty = SPECIES[target.kind].air ? toScreenY(target.alt) : gy - 10;
+      const r = 16 + Math.sin(state.time * 10) * 2;
+      ctx.strokeStyle = '#ff5544'; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.arc(tx, ty, r, 0, Math.PI * 2); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(tx - r - 6, ty); ctx.lineTo(tx - r + 4, ty); ctx.moveTo(tx + r - 4, ty); ctx.lineTo(tx + r + 6, ty); ctx.stroke();
+    }
+  }
+  ctx.filter = OUTLINE;
+  for (const f of state.fallers) drawTurtle(toScreenX(f.x), toScreenY(f.alt), { vx: f.vx }, SPECIES.turtle.scale, f.spin);
+  ctx.filter = 'none';
+}
+
+const hash = n => { const s = Math.sin(n * 12.9898) * 43758.5453; return s - Math.floor(s); };
+// World layout (thermals, ridges, lakes, clouds, rivals) is re-rolled each run via this seed
+let worldSeed = 0;
+const wh = n => hash(n + worldSeed);
+const GRASS_COLORS = ['#3f6e2a', '#5f9a3a', '#79b34a'];
+
+function drawGrass() {
+  const BLADE_M = 0.1;
+  // Thin out blades when zoomed out so on-screen density stays ~1 blade per 5 px
+  const keep = Math.min(1, BLADE_M * cam.zoom / 5);
+  const groundY = toScreenY(0);
+  const t = state.time;
+  const i0 = Math.floor((cam.x - (W / 2 + 30) / cam.zoom) / BLADE_M);
+  const i1 = Math.ceil((cam.x + (W / 2 + 30) / cam.zoom) / BLADE_M);
+  const paths = GRASS_COLORS.map(() => new Path2D());
+  for (let i = i0; i <= i1; i++) {
+    if (hash(i) > keep) continue;
+    const r2 = hash(i + 0.37), r3 = hash(i + 0.71);
+    const wx = (i + r2) * BLADE_M;
+    if (lakeAtX(wx)) continue;
+    const sx = toScreenX(wx);
+    const h = 9 + r3 * 12;
+    let bend = Math.sin(t * 1.8 + wx * 0.35) * 0.18 + Math.sin(t * 0.6 + wx * 0.04) * 0.14 + windX(2) * 0.04;
+    for (const w of state.wake) {
+      const dxPx = (wx - w.x) * cam.zoom;
+      if (dxPx > 80 || dxPx < -80) continue;
+      const inf = Math.exp(-((dxPx / 25) ** 2)) * w.s * (1 - (t - w.t) / 1.5);
+      bend += (Math.sign(dxPx) || 1) * inf * 1.1 + Math.sin(t * 20 + i) * inf * 0.15;
+    }
+    bend = Math.max(-1.3, Math.min(1.3, bend));
+    const p = paths[Math.floor(r3 * 2.999)];
+    p.moveTo(sx, groundY + 2);
+    p.quadraticCurveTo(sx + Math.sin(bend) * h * 0.3, groundY - h * 0.6,
+                       sx + Math.sin(bend) * h, groundY - Math.cos(bend) * h);
+  }
+  ctx.lineWidth = 2; ctx.lineCap = 'round';
+  paths.forEach((p, k) => { ctx.strokeStyle = GRASS_COLORS[k]; ctx.stroke(p); });
+  ctx.lineCap = 'butt';
+}
+
+function drawLens(cx, cy, bg, drawContent) {
+  ctx.save();
+  ctx.beginPath(); ctx.arc(cx, cy, LENS_R, 0, Math.PI * 2); ctx.clip();
+  ctx.fillStyle = bg; ctx.fillRect(cx - LENS_R, cy - LENS_R, LENS_R * 2, LENS_R * 2);
+  drawContent();
+  ctx.restore();
+  ctx.beginPath(); ctx.arc(cx, cy, LENS_R, 0, Math.PI * 2);
+  ctx.strokeStyle = 'rgba(0,0,0,0.6)'; ctx.lineWidth = 5; ctx.stroke();
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.stroke();
+}
+
+function birdScreenAngle() {
+  return Math.atan2(Math.sin(bird.angle) * cam.zoomY, Math.cos(bird.angle) * cam.zoom);
+}
+
+function birdAboveScreen() { return toScreenY(bird.alt) < 8; }
+
+// Bird's on-screen reference point: its real position, or the lens when it's above the screen
+function birdAnchor() {
+  const x = toScreenX(bird.x);
+  if (!birdAboveScreen()) return { x, y: toScreenY(bird.alt) };
+  return { x: Math.max(LENS_R + 10, Math.min(W - LENS_R - 10, x)), y: LENS_R + 12 };
+}
+
+function drawBirdLens() {
+  if (!birdAboveScreen()) return;
+  const { x, y } = birdAnchor();
+  drawLens(x, y, '#9cc8ef', () => {
+    if (bird.carrying) drawTurtle(x, y + 18, { vx: bird.vx }, 1.2);
+    drawBirdSprite(x, y, birdScreenAngle(), 1.8);
+  });
+  const label = `+${(bird.alt - MAX_ALT).toFixed(0)} m`;
+  ctx.font = 'bold 12px monospace';
+  const w = ctx.measureText(label).width + 10;
+  ctx.fillStyle = 'rgba(0,0,0,0.65)';
+  ctx.fillRect(x - w / 2, y + LENS_R + 6, w, 18);
+  ctx.fillStyle = '#66ccff'; ctx.textAlign = 'center';
+  ctx.fillText(label, x, y + LENS_R + 19);
+}
+
+function drawBird() {
+  const sx = toScreenX(bird.x), sy = toScreenY(bird.alt);
+  ctx.filter = OUTLINE;
+  if (bird.carrying) drawTurtle(sx, sy + 22, { vx: bird.vx }, SPECIES.turtle.scale);
+  // Player sprite is deliberately oversized and grows further when zoomed out
+  drawBirdSprite(sx, sy, birdScreenAngle(), Math.max(FALCON_SCALE, cam.zoom / 35));
+  ctx.filter = 'none';
+
+  // Speed streaks
+  if (bird.speed > DIVE_SPEED) {
+    ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+    for (let i = 0; i < 4; i++) {
+      const ox = (Math.random() - 0.5) * 30, oy = (Math.random() - 0.5) * 30;
+      ctx.beginPath();
+      ctx.moveTo(sx + ox, sy + oy);
+      ctx.lineTo(sx + ox - bird.vx * cam.zoom * 0.08, sy + oy + bird.vy * cam.zoomY * 0.08);
+      ctx.stroke();
+    }
+  }
+}
+
+function drawBirdSprite(sx, sy, screenAngle, sprite) {
+  ctx.save();
+  ctx.translate(sx, sy);
+  ctx.rotate(-screenAngle);
+  ctx.scale(sprite, sprite);
+
+  // Wing shape depends on mode
+  const effort = bird.tuck ?? 0.5;
+  let span, sweep;
+  if (bird.mode === 'DIVE') { span = 12 - effort * 7; sweep = -16; }   // tucked
+  else if (bird.mode === 'BRAKE') { span = 20; sweep = 4; }            // flared
+  else if (bird.mode === 'FLAP') { span = 16 + Math.sin(bird.flapT) * 10; sweep = -6; }
+  else { span = 18 - effort * 6; sweep = -6 - effort * 4; }
+
+  ctx.fillStyle = '#4a4a52';
+  // wings
+  ctx.beginPath();
+  ctx.moveTo(4, 0); ctx.lineTo(sweep, -span); ctx.lineTo(-6, 0);
+  ctx.lineTo(sweep, span); ctx.closePath(); ctx.fill();
+  // body
+  ctx.fillStyle = '#2f2f36';
+  ctx.beginPath(); ctx.ellipse(0, 0, 12, 4, 0, 0, Math.PI * 2); ctx.fill();
+  // tail
+  ctx.beginPath(); ctx.moveTo(-10, 0); ctx.lineTo(-18, -4); ctx.lineTo(-18, 4); ctx.fill();
+  // head + beak
+  ctx.fillStyle = '#1c1c22';
+  ctx.beginPath(); ctx.arc(11, 0, 3.5, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#f2c230';
+  ctx.beginPath(); ctx.moveTo(14, -1); ctx.lineTo(18, 1); ctx.lineTo(14, 2); ctx.fill();
+  ctx.restore();
+}
+
+function drawArrow(tipX, tipY, ux, uy) {
+  ctx.fillStyle = '#d62828'; ctx.strokeStyle = '#fff'; ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(tipX, tipY);
+  ctx.lineTo(tipX - ux * 16 - uy * 9, tipY - uy * 16 + ux * 9);
+  ctx.lineTo(tipX - ux * 16 + uy * 9, tipY - uy * 16 - ux * 9);
+  ctx.closePath(); ctx.fill(); ctx.stroke();
+}
+
+function drawLabel(text, x, y) {
+  ctx.font = 'bold 12px monospace';
+  const w = ctx.measureText(text).width + 10;
+  ctx.fillStyle = 'rgba(0,0,0,0.65)';
+  ctx.fillRect(x - w / 2, y - 9, w, 18);
+  ctx.fillStyle = '#fff'; ctx.textAlign = 'center';
+  ctx.fillText(text, x, y + 4);
+}
+
+function drawPreyIndicators() {
+  // Arrow over the nearest target; if off-screen, a lens at the screen edge on the line from the bird
+  if (bird.carrying) return;
+  let near = null, best = Infinity;
+  for (const p of prey) {
+    if (p.gone || p.hidden || p.spent) continue;
+    const d = Math.hypot(p.x - bird.x, (SPECIES[p.kind].air ? p.alt : 0) - bird.alt);
+    if (d < best) { best = d; near = p; }
+  }
+  if (!near || best < 40) return;
+  const s = SPECIES[near.kind];
+  const label = `${best.toFixed(0)} m`;
+  const rx = toScreenX(near.x), ry = s.air ? toScreenY(near.alt) : toScreenY(0) - 10;
+  if (rx >= 0 && rx <= W && ry >= 0 && ry <= H) {
+    drawArrow(rx, ry - (s.air ? 18 : 14), 0, 1);
+    return;
+  }
+  const { x: bx, y: by } = birdAnchor();
+  const dx = rx - bx, dy = ry - by, inset = LENS_R + 14;
+  let t = 1;
+  if (dx > 0) t = Math.min(t, (W - inset - bx) / dx);
+  if (dx < 0) t = Math.min(t, (inset - bx) / dx);
+  if (dy > 0) t = Math.min(t, (H - inset - by) / dy);
+  if (dy < 0) t = Math.min(t, (inset - by) / dy);
+  const cx = bx + dx * t, cy = by + dy * t;
+  const len = Math.hypot(dx, dy) || 1, ux = dx / len, uy = dy / len;
+  drawLens(cx, cy, '#bfe3ff', () => {
+    if (s.air) {
+      drawSpecies(near.kind, cx, cy, near, s.scale * 0.9);
+    } else {
+      ctx.fillStyle = '#5c8a3a';
+      ctx.fillRect(cx - LENS_R, cy + 10, LENS_R * 2, LENS_R);
+      drawSpecies(near.kind, cx, cy + 10, near, s.scale * 0.9);
+    }
+  });
+  drawArrow(cx + ux * (LENS_R + 20), cy + uy * (LENS_R + 20), ux, uy);
+  drawLabel(label, cx, cy - LENS_R - 12);
+}
+
+function drawHUD() {
+  // Altitude meter (sqrt scale so low altitudes stay readable)
+  const mx = 40, top = 80, bottom = H - 60;
+  const altY = a => bottom - Math.sqrt(Math.min(1, Math.max(0, a) / MAX_ALT)) * (bottom - top);
+  ctx.fillStyle = 'rgba(0,0,0,0.4)';
+  ctx.fillRect(mx - 30, top - 10, 60, bottom - top + 20);
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(mx + 10, top); ctx.lineTo(mx + 10, bottom); ctx.stroke();
+  ctx.font = '10px monospace'; ctx.fillStyle = '#fff'; ctx.textAlign = 'right';
+  for (const a of [0, 25, 50, 100, 200, 300, 400, MAX_ALT]) {
+    ctx.fillText(a, mx + 4, altY(a) + 3);
+  }
+  const ay = altY(bird.alt);
+  ctx.fillStyle = '#ffdd55';
+  ctx.beginPath(); ctx.moveTo(mx + 10, ay); ctx.lineTo(mx + 22, ay - 6); ctx.lineTo(mx + 22, ay + 6); ctx.fill();
+  const altLabel = `${bird.alt.toFixed(0)} m`;
+  ctx.font = 'bold 13px monospace';
+  const altW = ctx.measureText(altLabel).width + 10;
+  ctx.fillStyle = 'rgba(0,0,0,0.65)';
+  ctx.fillRect(mx + 24, ay - 10, altW, 20);
+  ctx.fillStyle = bird.alt > MAX_ALT ? '#66ccff' : '#ffdd55'; ctx.textAlign = 'left';
+  ctx.fillText(altLabel, mx + 29, ay + 4);
+
+  if (bird.carrying) {
+    // Marker: the lowest altitude from which a release at your current speed would still crack the shell
+    const needH = (SHELL_CRACK_SPEED ** 2 - bird.vx ** 2 - bird.vy ** 2) / (2 * G);
+    if (needH > 0) {
+      const dy = altY(needH);
+      ctx.strokeStyle = '#7fd67f'; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.moveTo(mx - 4, dy); ctx.lineTo(mx + 14, dy); ctx.stroke();
+    }
+    const impact = predictImpact(bird.alt, bird.vx, bird.vy);
+    const ready = impact >= SHELL_CRACK_SPEED;
+    const pts = Math.round(SPECIES.turtle.pts + (impact - SHELL_CRACK_SPEED) * 20);
+    const text = ready
+      ? `Drop now: ~${(impact * 3.6).toFixed(0)} km/h impact (+${pts})  ·  hold right-click to aim, release to throw`
+      : `Turtle would hit at ~${(impact * 3.6).toFixed(0)} km/h — need ${(SHELL_CRACK_SPEED * 3.6).toFixed(0)}. Climb or dive faster`;
+    ctx.font = 'bold 15px sans-serif'; ctx.textAlign = 'center';
+    const tw = ctx.measureText(text).width + 24;
+    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    ctx.fillRect(W / 2 - tw / 2, 14, tw, 28);
+    ctx.fillStyle = ready ? '#7fd67f' : '#fff';
+    ctx.fillText(text, W / 2, 33);
+  }
+
+  // Readouts
+  drawSpeedometer(240, H - 170, 80);
+  drawCatchLog();
+
+  // Scale bar
+  const barM = niceStep(100 / cam.zoom), barPx = barM * cam.zoom;
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(W - 20 - barPx, H - 40); ctx.lineTo(W - 20 - barPx, H - 34);
+  ctx.lineTo(W - 20, H - 34); ctx.lineTo(W - 20, H - 40);
+  ctx.stroke();
+  ctx.fillStyle = '#fff'; ctx.font = '12px monospace'; ctx.textAlign = 'right';
+  ctx.fillText(`${barM} m`, W - 20, H - 44);
+
+  if (state.msgT > 0 || state.over) {
+    ctx.fillStyle = state.over ? '#ff5555' : '#ffffff';
+    ctx.font = 'bold 24px sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText(state.msg, W / 2, H / 2 - 80);
+  }
+
+  if (state.toast && state.toast.t > 0) {
+    ctx.globalAlpha = Math.min(1, state.toast.t);
+    ctx.font = 'bold 16px sans-serif'; ctx.textAlign = 'center';
+    const tw = ctx.measureText(state.toast.text).width + 30;
+    ctx.fillStyle = 'rgba(40,30,0,0.85)';
+    ctx.fillRect(W / 2 - tw / 2, 52, tw, 32);
+    ctx.strokeStyle = '#ffd34d'; ctx.lineWidth = 2;
+    ctx.strokeRect(W / 2 - tw / 2, 52, tw, 32);
+    ctx.fillStyle = '#ffd34d';
+    ctx.fillText(state.toast.text, W / 2, 74);
+    ctx.globalAlpha = 1;
+  }
+
+  ctx.fillStyle = 'rgba(255,255,255,0.7)'; ctx.font = '12px sans-serif'; ctx.textAlign = 'left';
+  ctx.fillText('Mouse = steer (farther = more power) · Point up = flap · Hold button = brake · Hold right-click = aim turtle, release = throw (Space = drop) · P/Esc = pause', 80, H - 15);
+}
+
+function drawSpeedometer(cx, cy, r) {
+  const MAX_KMH = 360, A0 = Math.PI * 0.75, SWEEP = Math.PI * 1.5;
+  const ang = kmh => A0 + SWEEP * Math.min(kmh, MAX_KMH) / MAX_KMH;
+  const kmh = bird.speed * 3.6;
+
+  // Brake energy: vertical bar to the right of the dial
+  const bx = cx + r + 18, bh = r * 1.6, btop = cy - bh / 2;
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  ctx.fillRect(bx - 6, btop - 4, 12, bh + 8);
+  ctx.fillStyle = bird.brakeLocked ? '#ff5544' : '#66ccff';
+  ctx.fillRect(bx - 3, btop + bh * (1 - bird.brakeE), 6, bh * bird.brakeE);
+  if (bird.brakeLocked) {
+    ctx.strokeStyle = '#ffdd55'; ctx.lineWidth = 1;
+    const uy = btop + bh * (1 - BRAKE_UNLOCK);
+    ctx.beginPath(); ctx.moveTo(bx - 6, uy); ctx.lineTo(bx + 6, uy); ctx.stroke();
+  }
+  ctx.fillStyle = '#cfe6f7'; ctx.font = '9px monospace'; ctx.textAlign = 'center';
+  ctx.fillText('BRK', bx, btop + bh + 16);
+
+  // Wind at the bird's altitude: arrow length and label above the dial
+  const w = windX(bird.alt), wy = cy - r - 24;
+  const len = Math.min(40, Math.abs(w) * 4) * Math.sign(w);
+  ctx.strokeStyle = '#cfe6f7'; ctx.fillStyle = '#cfe6f7'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(cx - len, wy); ctx.lineTo(cx + len, wy); ctx.stroke();
+  if (Math.abs(len) > 2) {
+    const d = Math.sign(len);
+    ctx.beginPath(); ctx.moveTo(cx + len + d * 6, wy); ctx.lineTo(cx + len - d * 2, wy - 5); ctx.lineTo(cx + len - d * 2, wy + 5); ctx.fill();
+  }
+  ctx.font = '11px monospace'; ctx.textAlign = 'center';
+  ctx.fillText(`wind ${(Math.abs(w) * 3.6).toFixed(0)} km/h`, cx, wy - 9);
+
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  ctx.beginPath(); ctx.arc(cx, cy, r + 8, 0, Math.PI * 2); ctx.fill();
+
+  // Zones: cruise / dive / extreme
+  ctx.lineWidth = 6;
+  for (const [a, b, c] of [[0, DIVE_SPEED * 3.6, '#7fd67f'], [DIVE_SPEED * 3.6, 300, '#ffdd55'], [300, MAX_KMH, '#ff5544']]) {
+    ctx.strokeStyle = c;
+    ctx.beginPath(); ctx.arc(cx, cy, r - 4, ang(a), ang(b)); ctx.stroke();
+  }
+
+  ctx.strokeStyle = '#fff'; ctx.fillStyle = '#fff';
+  ctx.font = '10px monospace'; ctx.textAlign = 'center';
+  for (let v = 0; v <= MAX_KMH; v += 20) {
+    const a = ang(v), major = v % 60 === 0;
+    const r0 = r - (major ? 18 : 12);
+    ctx.lineWidth = major ? 2 : 1;
+    ctx.beginPath();
+    ctx.moveTo(cx + Math.cos(a) * r0, cy + Math.sin(a) * r0);
+    ctx.lineTo(cx + Math.cos(a) * (r - 8), cy + Math.sin(a) * (r - 8));
+    ctx.stroke();
+    if (major) ctx.fillText(v, cx + Math.cos(a) * (r - 28), cy + Math.sin(a) * (r - 28) + 3);
+  }
+
+  // Session max marker
+  const am = ang(state.maxSpeed * 3.6);
+  ctx.fillStyle = '#66ccff';
+  ctx.beginPath();
+  ctx.moveTo(cx + Math.cos(am) * (r - 1), cy + Math.sin(am) * (r - 1));
+  ctx.lineTo(cx + Math.cos(am - 0.06) * (r + 8), cy + Math.sin(am - 0.06) * (r + 8));
+  ctx.lineTo(cx + Math.cos(am + 0.06) * (r + 8), cy + Math.sin(am + 0.06) * (r + 8));
+  ctx.fill();
+
+  // Needle
+  const a = ang(kmh);
+  ctx.strokeStyle = '#ff6633'; ctx.lineWidth = 3; ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(cx - Math.cos(a) * 10, cy - Math.sin(a) * 10);
+  ctx.lineTo(cx + Math.cos(a) * (r - 14), cy + Math.sin(a) * (r - 14));
+  ctx.stroke(); ctx.lineCap = 'butt';
+  ctx.fillStyle = '#ddd';
+  ctx.beginPath(); ctx.arc(cx, cy, 5, 0, Math.PI * 2); ctx.fill();
+
+  ctx.fillStyle = '#fff'; ctx.font = 'bold 22px monospace';
+  ctx.fillText(kmh.toFixed(0), cx, cy + r * 0.45);
+  ctx.font = '10px monospace'; ctx.fillStyle = '#bbb';
+  ctx.fillText('km/h', cx, cy + r * 0.45 + 13);
+
+  // Mode badge and vertical speed under the dial
+  const modeColor = { BRAKE: '#66ccff', DIVE: '#ffdd55', FLAP: '#7fd67f', STALL: '#ff8866' }[bird.mode] || '#fff';
+  ctx.font = 'bold 13px sans-serif';
+  const mw = ctx.measureText(bird.mode).width + 20;
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  ctx.fillRect(cx - mw / 2, cy + r + 14, mw, 22);
+  ctx.strokeStyle = modeColor; ctx.lineWidth = 2;
+  ctx.strokeRect(cx - mw / 2, cy + r + 14, mw, 22);
+  ctx.fillStyle = modeColor;
+  ctx.fillText(bird.mode, cx, cy + r + 30);
+
+  const vs = bird.vy || 0;
+  ctx.font = '12px monospace';
+  ctx.fillStyle = -vs > SAFE_VSPEED ? '#ff8866' : '#fff';
+  ctx.fillText(`V/S ${vs >= 0 ? '▲' : '▼'} ${Math.abs(vs).toFixed(1)} m/s`, cx, cy + r + 54);
+}
+
+function drawCatchLog() {
+  const log = state.catchLog;
+  const right = W - 14;
+  ctx.textAlign = 'right';
+  ctx.fillStyle = '#fff'; ctx.font = 'bold 18px sans-serif';
+  ctx.fillText(`SCORE ${state.score}`, right, 28);
+  if (!log.length) return;
+
+  const CW = 92, CH = 50, GAP = 6;
+  const maxCards = Math.max(1, Math.floor((W * 0.5) / (CW + GAP)));
+  const shown = log.slice(-maxCards);
+  const total = shown.length * (CW + GAP) - GAP;
+  let x = right - total;
+  const y = 38;
+  if (log.length > shown.length) {
+    ctx.fillStyle = '#ddd'; ctx.font = 'bold 13px sans-serif'; ctx.textAlign = 'right';
+    ctx.fillText(`+${log.length - shown.length}`, x - 8, y + CH / 2 + 5);
+  }
+  for (const c of shown) {
+    const fresh = state.time - c.t < 1.5;
+    ctx.fillStyle = 'rgba(0,0,0,0.55)';
+    ctx.fillRect(x, y, CW, CH);
+    ctx.strokeStyle = fresh ? '#ffdd55' : 'rgba(255,255,255,0.35)';
+    ctx.lineWidth = fresh ? 2 : 1;
+    ctx.strokeRect(x + 0.5, y + 0.5, CW - 1, CH - 1);
+    const air = SPECIES[c.kind].air;
+    // Light badge behind the icon so dark animals (starlings, swifts) stay visible
+    const ix = x + 17, iy = y + 25, ir = 14;
+    ctx.save();
+    ctx.beginPath(); ctx.arc(ix, iy, ir, 0, Math.PI * 2); ctx.clip();
+    ctx.fillStyle = '#cfe6f7'; ctx.fillRect(ix - ir, iy - ir, ir * 2, ir * 2);
+    if (!air) { ctx.fillStyle = '#7fae55'; ctx.fillRect(ix - ir, y + 36, ir * 2, ir); }
+    drawSpecies(c.kind, ix, air ? iy : y + 36, { hopT: 0, vx: 1, flapT: 1.2 }, SPECIES[c.kind].scale / ICON_SCALE);
+    ctx.restore();
+    ctx.beginPath(); ctx.arc(ix, iy, ir, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(255,255,255,0.8)'; ctx.lineWidth = 1.5; ctx.stroke();
+    if (c.turtleHit) drawTurtle(ix + 9, iy + 15, { vx: 1 }, 0.7);
+    if (c.count > 1) {
+      ctx.font = 'bold 12px sans-serif'; ctx.textAlign = 'left';
+      ctx.strokeStyle = '#000'; ctx.lineWidth = 3; ctx.strokeText(`×${c.count}`, x + 3, y + 13);
+      ctx.fillStyle = '#ffdd55'; ctx.fillText(`×${c.count}`, x + 3, y + 13);
+    }
+    ctx.textAlign = 'left';
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 15px monospace';
+    const sp = ((c.rel ?? c.speed) * 3.6).toFixed(0);
+    ctx.fillText(sp, x + 34, y + 21);
+    const spW = ctx.measureText(sp).width;
+    ctx.fillStyle = '#bbb'; ctx.font = '9px monospace';
+    ctx.fillText(c.rel != null ? 'rel' : 'km/h', x + 37 + spW, y + 21);
+    ctx.fillStyle = '#9fd8ff'; ctx.font = '11px monospace';
+    const detail = c.turtleHit ? 'turtle!' : c.drop != null ? `↓${c.drop.toFixed(0)} m` : c.air ? `@${c.alt.toFixed(0)} m` : `▼${c.minAlt.toFixed(1)} m`;
+    ctx.fillText(detail, x + 34, y + 39);
+    x += CW + GAP;
+  }
+}
+
+function drawPauseButton() {
+  const { x, y, w, h } = PAUSE_BTN;
+  const hover = inPauseBtn(mouse.x, mouse.y);
+  ctx.fillStyle = hover ? 'rgba(0,0,0,0.75)' : 'rgba(0,0,0,0.5)';
+  ctx.fillRect(x, y, w, h);
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 2;
+  ctx.strokeRect(x + 1, y + 1, w - 2, h - 2);
+  ctx.fillStyle = '#fff';
+  if (paused) {
+    ctx.beginPath(); ctx.moveTo(x + 16, y + 12); ctx.lineTo(x + 32, y + 22); ctx.lineTo(x + 16, y + 32); ctx.fill();
+  } else {
+    ctx.fillRect(x + 14, y + 12, 6, 20);
+    ctx.fillRect(x + 24, y + 12, 6, 20);
+  }
+
+  // Time of day beside the pause button
+  const sunUp = Math.sin(sunPhase()) > 0;
+  ctx.fillStyle = 'rgba(0,0,0,0.5)';
+  ctx.fillRect(x + w + 8, y + 8, 78, 28);
+  ctx.fillStyle = sunUp ? '#ffd34d' : '#cfd8ee';
+  ctx.beginPath(); ctx.arc(x + w + 22, y + 22, 7, 0, Math.PI * 2); ctx.fill();
+  if (!sunUp) { ctx.fillStyle = 'rgba(0,0,0,0.9)'; ctx.beginPath(); ctx.arc(x + w + 25, y + 20, 6, 0, Math.PI * 2); ctx.fill(); }
+  ctx.fillStyle = '#fff'; ctx.font = 'bold 14px monospace'; ctx.textAlign = 'left';
+  ctx.fillText(clockText(), x + w + 34, y + 27);
+}
+
+// Target reticle during an air chase. Colour: green when your own speed meets minStrike, red otherwise.
+// Fill: relative speed toward minRel (angle of attack). Catchable when green and full (it pulses).
+function drawClosingHint() {
+  const t = cam.tgt;
+  if (!t || t.gone || t.spent || cam.focus < 0.3 || !SPECIES[t.kind].minStrike) return;
+  const s = SPECIES[t.kind];
+  const fast = bird.speed >= s.minStrike;
+  const fill = Math.min(1, Math.hypot(bird.vx - t.vx - windX(t.alt), bird.vy - t.vy) / s.minRel);
+  const ready = fast && fill >= 1;
+  const x = toScreenX(t.x), y = toScreenY(t.alt);
+  const r = 22 + (ready ? Math.sin(state.time * 10) * 2 : 0);
+
+  ctx.lineWidth = 4; ctx.lineCap = 'round';
+  ctx.strokeStyle = 'rgba(0,0,0,0.45)';
+  ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.stroke();
+  ctx.strokeStyle = fast ? '#7fd67f' : '#ff5544';
+  ctx.beginPath(); ctx.arc(x, y, r, -Math.PI / 2, -Math.PI / 2 + fill * Math.PI * 2); ctx.stroke();
+  ctx.lineCap = 'butt';
+}
+
+function drawThermals() {
+  const half = W / 2 / cam.zoom;
+  const i0 = Math.floor((cam.x - half) / THERMAL_SPACING) - 1, i1 = Math.ceil((cam.x + half) / THERMAL_SPACING) + 1;
+  for (let i = i0; i <= i1; i++) {
+    const th = thermalCol(i);
+    if (!th.on) continue;
+    // Faint warm column, plus rising motes whose speed matches the thermal's strength
+    const cx = toScreenX(th.x), cw = th.w * cam.zoom * 1.6;
+    const col = ctx.createLinearGradient(cx - cw, 0, cx + cw, 0);
+    col.addColorStop(0, 'rgba(255,225,170,0)');
+    col.addColorStop(0.5, 'rgba(255,225,170,0.12)');
+    col.addColorStop(1, 'rgba(255,225,170,0)');
+    ctx.fillStyle = col;
+    const top = toScreenY(MAX_ALT), bottom = toScreenY(0);
+    ctx.fillRect(cx - cw, top, cw * 2, bottom - top);
+    ctx.fillStyle = '#fff0c8';
+    for (let k = 0; k < 40; k++) {
+      const alt = ((k * 37.7) % MAX_ALT + state.time * th.s * 3) % MAX_ALT;
+      const x = th.x + Math.sin(k * 2.3 + state.time * 0.8) * th.w * 0.7;
+      ctx.globalAlpha = 0.6 * Math.min(1, alt / 30) * Math.min(1, (MAX_ALT - alt) / 60);
+      ctx.fillRect(toScreenX(x) - 2, toScreenY(alt) - 2, 4, 4);
+    }
+    ctx.globalAlpha = 1;
+  }
+  // Sinking air: cool motes drifting down
+  ctx.fillStyle = '#bed7ff';
+  for (let i = i0; i <= i1; i++) {
+    const sk = sinkCol(i);
+    if (!sk.on) continue;
+    for (let k = 0; k < 20; k++) {
+      const alt = MAX_ALT - ((k * 41.3) % MAX_ALT + state.time * sk.s * 3) % MAX_ALT;
+      const x = sk.x + Math.sin(k * 1.7 + state.time * 0.5) * sk.w * 0.8;
+      ctx.globalAlpha = 0.45 * Math.min(1, alt / 30) * Math.min(1, (MAX_ALT - alt) / 60);
+      ctx.fillRect(toScreenX(x) - 1.5, toScreenY(alt) - 1.5, 3, 3);
+    }
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawSoundRings() {
+  for (const r of state.rings) {
+    const k = r.t / 0.8;
+    const rad = r.r * Math.sqrt(k);
+    ctx.beginPath();
+    ctx.ellipse(toScreenX(r.x), toScreenY(r.alt), Math.max(1, rad * cam.zoom), Math.max(1, rad * cam.zoomY), 0, 0, Math.PI * 2);
+    ctx.strokeStyle = r.kind === 'brake' ? `rgba(140,210,255,${0.25 * (1 - k)})`
+      : r.kind === 'wind' ? `rgba(220,230,255,${0.12 * (1 - k)})`
+      : `rgba(255,255,255,${0.3 * (1 - k)})`;
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+}
+
+function drawDetectionZones() {
+  const hear = hearingRange();
+  for (const p of prey) {
+    const sn = SENSES[p.kind];
+    if (!sn || p.gone || p.hidden || p.spent || p.fleeing || p.spookT > 0 || p.scatterT > 0) continue;
+    const a = Math.max(0, 1 - Math.abs(p.x - bird.x) / 400);
+    if (a <= 0.02) continue;
+    const ex = toScreenX(p.x), ey = toScreenY(eyeAlt(p));
+
+    // Vision cone (red); the gap is the blind spot
+    const dir = lookAngle(p), range = visionRange(sn);
+    ctx.beginPath();
+    if (sn.half < Math.PI) ctx.moveTo(ex, ey);
+    const N = 24;
+    for (let i = 0; i <= N; i++) {
+      const ang = dir - sn.half + (2 * sn.half * i) / N;
+      const alt = Math.max(0, eyeAlt(p) + Math.sin(ang) * range);
+      ctx.lineTo(toScreenX(p.x + Math.cos(ang) * range), toScreenY(alt));
+    }
+    ctx.closePath();
+    ctx.fillStyle = `rgba(255,60,60,${0.1 * a})`; ctx.fill();
+    ctx.strokeStyle = `rgba(255,90,90,${0.5 * a})`; ctx.lineWidth = 1.5;
+    ctx.setLineDash([6, 6]); ctx.stroke();
+
+    // Hearing ring (orange); grows when you flap or brake
+    ctx.beginPath();
+    ctx.ellipse(ex, ey, hear * cam.zoom, hear * cam.zoomY, 0, 0, Math.PI * 2);
+    ctx.strokeStyle = `rgba(255,170,60,${0.7 * a})`;
+    ctx.setLineDash([2, 5]); ctx.stroke();
+    ctx.setLineDash([]);
+  }
+}
+
+function drawDevils() {
+  for (const dv of state.devils) {
+    const f = devilFade(dv);
+    if (f <= 0) continue;
+    const bx = toScreenX(dv.x), gy = toScreenY(0);
+    if (bx < -200 || bx > W + 200) continue;
+    ctx.fillStyle = `rgba(190,160,110,${0.35 * f})`;
+    ctx.beginPath(); ctx.ellipse(bx, gy - 2, (dv.w * 1.5) * cam.zoom + 6, 5, 0, 0, Math.PI * 2); ctx.fill();
+    for (let k = 0; k < 60; k++) {
+      const a = k / 60, alt = a * dv.top;
+      const rr = dv.w * (0.3 + a * 1.2);
+      const ang = dv.t * 7 + k * 0.9;
+      ctx.fillStyle = `rgba(200,170,120,${0.5 * f * (1 - a * 0.7)})`;
+      ctx.fillRect(toScreenX(dv.x + Math.cos(ang) * rr) - 2, toScreenY(alt) - 2, 4, 4);
+    }
+  }
+}
+
+function drawBuzzard(x, y, r, s) {
+  const f = Math.sin(r.flapT) * (r.mode === 'chase' ? 1 : 0.35);
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.scale((r.vx < 0 ? -1 : 1) * s, s);
+  ctx.fillStyle = '#6b4a2e';
+  ctx.beginPath(); ctx.moveTo(4, -1); ctx.lineTo(-6, -2 - f * 16); ctx.lineTo(-16, -1 - f * 12); ctx.lineTo(-8, 1); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = '#5a3d25';
+  ctx.beginPath(); ctx.ellipse(0, 0, 13, 4.5, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#c9b08a';
+  ctx.beginPath(); ctx.ellipse(1, 2, 8, 2, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#5a3d25';
+  ctx.beginPath(); ctx.moveTo(-12, 0); ctx.lineTo(-20, -4); ctx.lineTo(-20, 4); ctx.fill();
+  ctx.beginPath(); ctx.arc(12, -1, 4, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#e8c040';
+  ctx.beginPath(); ctx.moveTo(15, -2); ctx.lineTo(19, 0); ctx.lineTo(15, 1); ctx.fill();
+  ctx.restore();
+}
+
+function drawRivals() {
+  ctx.filter = OUTLINE;
+  for (const r of state.rivals) {
+    const x = toScreenX(r.x), y = toScreenY(r.alt);
+    if (x < -60 || x > W + 60 || y < -60 || y > H + 60) continue;
+    drawBuzzard(x, y, r, 1.5);
+  }
+  ctx.filter = 'none';
+  for (const r of state.rivals) if (r.alertT > 0) drawAlert(toScreenX(r.x), toScreenY(r.alt) - 24);
+}
+
+// Storm darkening, rain and lightning; plus night and golden-hour tints over the world
+function drawAtmosphere() {
+  const d = daylight(), tw = twilight(), s = state.storm;
+  if (d < 1) { ctx.fillStyle = `rgba(8,12,35,${0.3 * (1 - d)})`; ctx.fillRect(0, 0, W, H); }
+  if (tw > 0) { ctx.fillStyle = `rgba(255,140,60,${0.1 * tw})`; ctx.fillRect(0, 0, W, H); }
+  if (s.k > 0.01) {
+    ctx.fillStyle = `rgba(25,30,45,${0.4 * s.k})`;
+    ctx.fillRect(0, 0, W, H);
+    const slant = windX(bird.alt) / 25;
+    ctx.strokeStyle = `rgba(200,210,230,${0.45 * s.k})`; ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let i = 0; i < Math.round(260 * s.k); i++) {
+      const y = (hash(i * 1.3) * H + state.time * 900) % H;
+      const x = ((hash(i * 2.9) * W + y * slant) % W + W) % W;
+      ctx.moveTo(x, y); ctx.lineTo(x + slant * 14, y + 14);
+    }
+    ctx.stroke();
+  }
+  if (s.flash > 0) { ctx.fillStyle = `rgba(255,255,255,${s.flash * 4})`; ctx.fillRect(0, 0, W, H); }
+}
+
+function draw() {
+  ctx.save();
+  if (!state.over && !paused && cam.shake > 0) {
+    ctx.translate((Math.random() - 0.5) * cam.shake, (Math.random() - 0.5) * cam.shake);
+  }
+  drawBackground();
+  drawThermals();
+  drawDevils();
+  drawDetectionZones();
+  prey.forEach(drawPrey);
+  drawGrass();
+  drawFallers();
+  drawRivals();
+  drawSoundRings();
+  ctx.fillStyle = '#ccc';
+  for (const p of particles) ctx.fillRect(toScreenX(p.x), toScreenY(p.alt), 3, 3);
+  if (!state.over) drawBird();
+  ctx.restore();
+  drawAtmosphere();
+  // Whiteout while flying through a cloud
+  if (state.fog > 0.01) {
+    ctx.fillStyle = `rgba(236,241,247,${0.7 * state.fog})`;
+    ctx.fillRect(0, 0, W, H);
+  }
+  if (timeScale < 0.98) {
+    const v = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.35, W / 2, H / 2, Math.max(W, H) * 0.75);
+    v.addColorStop(0, 'rgba(0,0,0,0)');
+    v.addColorStop(1, `rgba(0,10,30,${(1 - timeScale) * 0.9})`);
+    ctx.fillStyle = v;
+    ctx.fillRect(0, 0, W, H);
+  }
+  drawPreyIndicators();
+  drawClosingHint();
+  drawBirdLens();
+  drawSunIndicator();
+  drawHUD();
+  if (paused) {
+    ctx.fillStyle = 'rgba(0,0,0,0.45)';
+    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = '#fff'; ctx.textAlign = 'center';
+    ctx.font = 'bold 48px sans-serif';
+    ctx.fillText('PAUSED', W / 2, H / 2);
+    ctx.font = '16px sans-serif';
+    ctx.fillText('Press P / Esc or click to resume', W / 2, H / 2 + 34);
+  }
+  if (!state.over) drawPauseButton();
+}
+
+// ---------- Loop ----------
+let last = performance.now();
+const SLOWMO_SCALE = 0.55;
+let timeScale = 1;
+function loop(now) {
+  const dt = Math.min(0.033, (now - last) / 1000);
+  last = now;
+  // Braking slows time a little for precise pull-outs and air strikes
+  const slow = !paused && !state.over && (bird.mode === 'BRAKE' || (mouse.aiming && bird.carrying));
+  timeScale += ((slow ? SLOWMO_SCALE : 1) - timeScale) * Math.min(1, dt * 6);
+  update(dt * timeScale);
+  draw();
+  requestAnimationFrame(loop);
+}
+reset();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
