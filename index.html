@@ -27,6 +27,7 @@ const FLAP_MAX_SPEED = 50;    // flapping can't push past this
 const STALL_SPEED = 10;
 const DIVE_SPEED = 40;        // above this (and pointing down) = dive mode
 const SAFE_VSPEED = 14;       // max descent rate on ground contact (m/s)
+const CRASH_REVEAL_DELAY = 0.9;
 const BRAKE_DURATION = 2.5;   // seconds of continuous braking from a full meter
 const BRAKE_RECHARGE = 5;     // seconds to refill from empty
 const BRAKE_UNLOCK = 0.3;     // after running dry, the meter must refill this far before braking again
@@ -65,15 +66,15 @@ const inPauseBtn = (x, y) =>
 
 const SETTINGS_KEY = 'falconDive.settings';
 const DEFAULT_ANIMAL_SIZES = {
-  rabbit: 1.659375,
-  hare: 1.3968749999999999,
-  mouse: 2.03125,
-  squirrel: 1.005,
-  turtle: 1.8125,
-  pigeon: 1.5062499999999999,
-  duck: 1.528125,
-  swift: 1.0031249999999998,
-  flock: 1.178125,
+  rabbit: 1.6,
+  hare: 1.4,
+  mouse: 2,
+  squirrel: 1,
+  turtle: 1.8,
+  pigeon: 1.5,
+  duck: 1.5,
+  swift: 1,
+  flock: 1.2,
 };
 let settings = { animalSizes: { ...DEFAULT_ANIMAL_SIZES }, previewKind: 'rabbit' };
 function loadSettings() {
@@ -181,6 +182,7 @@ canvas.addEventListener('mousemove', e => {
   canvas.style.cursor = inPauseBtn(e.clientX, e.clientY) ? 'pointer' : 'crosshair';
 });
 canvas.addEventListener('mousedown', e => {
+  if (state.crash && state.crash.t < CRASH_REVEAL_DELAY) return;
   if (inPauseBtn(e.clientX, e.clientY)) { if (!state.over) togglePause(); return; }
   if (paused) {
     paused = false;
@@ -248,6 +250,7 @@ function reset() {
   particles = [];
   cam = { x: 0, alt: 220, zoom: 2.5, zoomY: 2.5, gz: 2.5, focus: 0, ft: null, shake: 0 };
   state = { score: 0, catches: 0, over: false, msg: '', msgT: 0, maxSpeed: 0, nextGroundX: 150, nextAirX: 300,
+            hearingRadius: 8, crash: null,
             catchLog: [], time: 0, wake: [], wakeT: 0, fallers: [], rings: [],
             wind: { x: (Math.random() * 2 - 1) * 6, target: 0, changeT: 0, hx: (Math.random() * 2 - 1) * 10, htarget: 0, hchangeT: 0 },
             cloudOff: 0, cirrusOff: 0, fog: 0,
@@ -331,8 +334,11 @@ function makeGround(x, kind = pickKind(false)) {
   const dir = randDir();
   const p = { kind, x, vx: dir * (2 + Math.random() * 4), hopT: Math.random() * 10, failCD: 0, alertT: 0, shadowReach: 0 };
   if (kind === 'hare') p.vx = dir * (1 + Math.random() * 2);
-  if (kind === 'mouse') { p.vx = dir * (1 + Math.random()); p.moving = true; p.pauseT = 0; }
-  if (kind === 'squirrel') { p.home = x + randDir() * (20 + Math.random() * 25); p.wanderX = x; p.vx = dir * 2; }
+  if (kind === 'mouse') {
+    p.home = x + randDir() * (20 + Math.random() * 25); p.wanderX = x;
+    p.vx = dir * (1 + Math.random()); p.moving = true; p.pauseT = 0;
+  }
+  if (kind === 'squirrel') { p.wanderX = x; p.vx = dir * 2; }
   if (kind === 'turtle') p.vx = dir * 0.4;
   return p;
 }
@@ -382,7 +388,7 @@ const SENSES = {
   rabbit:    { range: 60,  half: 1.0, reaction: 0.45, look: p => (facing(p) > 0 ? 0.8 : Math.PI - 0.8) },
   hare:      { range: 75,  half: 1.2, reaction: 0.3,  look: p => (facing(p) > 0 ? 0.9 : Math.PI - 0.9) }, // hare looks ahead; hearing is a simple full-circle radius
   mouse:     { range: 50,  half: 0.9, reaction: 0.5,  look: p => (facing(p) > 0 ? 0.7 : Math.PI - 0.7) },
-  squirrel:  { range: 75,  half: 0.8, reaction: 0.5,  look: p => (facing(p) > 0 ? 1.05 : Math.PI - 1.05) },
+  squirrel:  { range: 75,  half: 1.0, reaction: 0.5,  look: p => (facing(p) > 0 ? 0.8 : Math.PI - 0.8) }, // cone reaches down to the ground so it can see shadows
   turtle:    { range: 35,  half: 0.8, reaction: 0.7,  look: p => (facing(p) > 0 ? 0.5 : Math.PI - 0.5) },
   pigeon:    { range: 45,  half: 1.4, reaction: 0.25, look: p => forwardDown(p, 0.6) },
   duck:      { range: 70,  half: 1.3, reaction: 0.4,  look: p => (p.sitting ? forwardDown(p, -0.8) : forwardDown(p, 0.6)) }, // resting ducks watch the sky
@@ -391,7 +397,12 @@ const SENSES = {
 };
 // Wind roar from a fast stoop: 8 m when gliding, growing to ~30 m at full dive speed
 const diveNoise = () => 8 + Math.max(0, Math.min(1, (bird.speed - 42) / 53)) * 22;
-const hearingRange = () => Math.max(bird.mode === 'FLAP' ? 40 : bird.mode === 'BRAKE' ? 25 : 0, diveNoise());
+const hearingRange = () => state.hearingRadius;
+function updateHearingRange(dt) {
+  const target = Math.max(bird.mode === 'FLAP' ? 40 : bird.mode === 'BRAKE' ? 25 : 0, diveNoise());
+  const duration = target > state.hearingRadius ? 0.5 : 0.8;
+  state.hearingRadius += (target - state.hearingRadius) * (1 - Math.exp(-dt / duration));
+}
 const eyeAlt = p => (SPECIES[p.kind].air ? p.alt : 0.3);
 
 const lookAngle = p => p.lookA ?? SENSES[p.kind].look(p);
@@ -453,11 +464,13 @@ function sensed(p, dt) {
   } else {
     p.shadowReach = Math.max(0, (p.shadowReach || 0) - dt * 65);
   }
-  if (sense.reason) p.alertT = Math.max(p.alertT || 0, 0.8);
+  if (sense.reason) {
+    p.alertT = Math.max(p.alertT || 0, 0.8);
+    p.lastSense = sense.reason;
+  }
   p.aware = sense.reason ? (p.aware || 0) + dt : Math.max(0, (p.aware || 0) - dt * 0.5);
   if (p.aware < SENSES[p.kind].reaction) return false;
   p.aware = 0;
-  p.lastSense = sense.reason || p.lastSense;
   if (!p.fleeing && sense.reason) p.fleeing = true;
   return true;
 }
@@ -645,7 +658,7 @@ function insideCloud(x, alt) {
 }
 
 const groundEscapeTime = {
-  rabbit: 4.5, hare: 3.2, mouse: 3.0, squirrel: 4.5, turtle: 5.0,
+  rabbit: 4.5, hare: 3.2, squirrel: 4.5, turtle: 5.0,
 };
 const airEscapeTime = {
   pigeon: 4.5, duck: 3.5, swift: 3.2, flock: 3.8,
@@ -679,28 +692,7 @@ function updateGroundPrey(p, dt) {
         vx = p.vx; p.hopT += dt;
       }
       break;
-    case 'mouse':
-      p.pauseT -= dt;
-      if (p.fleeing) {
-        p.turnT = (p.turnT ?? 0.25) - dt;
-        if (p.turnT <= 0) {
-          p.vx = (Math.random() < 0.5 ? -1 : 1) * (7 + Math.random() * 6);
-          p.turnT = 0.18 + Math.random() * 0.45;
-        }
-        p.hopT += dt * 4;
-        vx = p.vx;
-        break;
-      }
-      if (!p.fleeing && sensed(p, dt)) { p.fleeing = true; p.alertT = 0.8; p.escapeT = 0; }
-      if (p.pauseT <= 0) {
-        p.moving = !p.moving;
-        p.pauseT = p.moving ? 0.3 + Math.random() * 0.8 : 0.5 + Math.random() * 1.5;
-        if (p.moving && Math.random() < 0.5) p.vx *= -1;
-      }
-      vx = p.moving ? p.vx : 0;
-      if (p.moving) p.hopT += dt;
-      break;
-    case 'squirrel': {
+    case 'mouse': {
       if (p.hidden) {
         p.hideT -= dt;
         if (p.hideT <= 0 && hdist > 60) p.hidden = false;
@@ -709,9 +701,39 @@ function updateGroundPrey(p, dt) {
       if (!p.fleeing && sensed(p, dt)) { p.fleeing = true; p.alertT = 0.8; }
       if (p.fleeing) {
         const d = p.home - p.x;
-        if (Math.abs(d) < 0.5) { p.hidden = true; p.fleeing = false; p.hideT = 5; p.x = p.home; return; }
+        if (Math.abs(d) < 0.5) {
+          p.hidden = true; p.fleeing = false; p.hideT = 5; p.x = p.home;
+          p.curVx = 0; p.moving = false; p.aware = 0; p.alertT = 0;
+          return;
+        }
         vx = Math.sign(d) * Math.min(9, Math.abs(d) / dt);
-        p.hopT += dt * 2;
+        p.moving = true;
+        p.hopT += dt * 4;
+        break;
+      }
+      p.pauseT -= dt;
+      if (p.pauseT <= 0) {
+        p.moving = !p.moving;
+        p.pauseT = p.moving ? 0.3 + Math.random() * 0.8 : 0.5 + Math.random() * 1.5;
+        if (p.moving && Math.random() < 0.5) p.vx *= -1;
+      }
+      if (Math.abs(p.x - p.wanderX) > 10) p.vx = Math.sign(p.wanderX - p.x) * Math.abs(p.vx);
+      vx = p.moving ? p.vx : 0;
+      if (p.moving) p.hopT += dt;
+      break;
+    }
+    case 'squirrel': {
+      if (!p.fleeing && sensed(p, dt)) { p.fleeing = true; p.alertT = 0.8; }
+      if (p.fleeing) {
+        p.feintT = (p.feintT ?? 0) - dt;
+        if (p.feintT <= 0) {
+          p.feint = !p.feint;
+          p.feintT = p.feint ? 0.12 + Math.random() * 0.1 : 0.55 + Math.random() * 0.35;
+          const away = Math.sign(hdx) || Math.sign(p.face || p.vx) || 1;
+          p.dir = p.feint ? -away : away;
+        }
+        vx = p.dir * (p.feint ? 7 : 22);
+        p.hopT += dt * (p.feint ? 2 : 4);
       } else {
         if (Math.abs(p.x - p.wanderX) > 10) p.vx = Math.sign(p.wanderX - p.x) * 2;
         else wanderFlip(p, dt);
@@ -723,27 +745,29 @@ function updateGroundPrey(p, dt) {
       p.hopT += dt;
       break;
   }
-  if (p.fleeing && !p.hidden) {
+  if (p.fleeing && !p.hidden && p.kind !== 'mouse') {
     const away = Math.sign(p.x - bird.x) || (p.face ?? (p.vx || 1));
     p.escapeT = (p.escapeT || 0) + dt;
     const maxEscape = groundEscapeTime[p.kind] ?? 4;
-    if (p.escapeT >= maxEscape) {
+    if (!p.spent && p.escapeT >= maxEscape) {
       p.spent = true;
+      p.outran = true;
       p.fadeT = 1.2;
       p.alertT = 0.8;
     }
-    const speedBoost = 10 + Math.min(8, p.escapeT * 2);
-    vx = away * speedBoost;
-    if (p.kind === 'mouse' || p.kind === 'squirrel' || p.kind === 'hare') {
-      vx += (Math.random() - 0.5) * 2.5;
+    if (p.kind !== 'squirrel') {
+      const speedBoost = 10 + Math.min(8, p.escapeT * 2);
+      vx = away * speedBoost;
+      if (p.kind === 'hare') vx += (Math.random() - 0.5) * 2.5;
+      p.hopT += dt * 2.4;
     }
-    p.hopT += dt * ((p.kind === 'mouse' || p.kind === 'squirrel') ? 4 : 2.4);
   }
   if (p.spent) {
     p.fadeT = (p.fadeT ?? 1.2) - dt;
     if (p.fadeT <= 0) { p.gone = true; return; }
   }
   if (vx !== 0) p.face = vx;
+  p.curVx = vx;
   p.x += vx * dt;
 }
 
@@ -759,8 +783,9 @@ function updateAirPrey(p, dt) {
   if (p.spookT > 0 || p.fleeing || p.scatterT > 0) {
     p.escapeT = (p.escapeT || 0) + dt;
     const maxEscape = airEscapeTime[p.kind] ?? 4;
-    if (p.escapeT >= maxEscape) {
+    if (!p.spent && p.escapeT >= maxEscape) {
       p.spent = true;
+      p.outran = true;
       p.fadeT = 1.2;
       p.alertT = 0.8;
     }
@@ -839,11 +864,12 @@ function award(entry, pts, msg) {
 
 function checkCatch(p, dt) {
   const s = SPECIES[p.kind];
-  if (p.spent) return;
+  // An animal fading out after its flee timer ran out is still on screen and can still be caught
+  if (p.spent && !p.outran) return;
   if (p.failCD > 0) { p.failCD -= dt; return; }
   if (!s.air) {
     if (p.hidden) return;
-    const dx = p.x - bird.x, prevDx = dx + bird.vx * dt;
+    const dx = p.x - bird.x, prevDx = dx + (bird.vx - (p.curVx || 0)) * dt;
     const crossed = Math.sign(dx) !== Math.sign(prevDx);
     if (!((Math.abs(dx) < s.radius || crossed) && bird.alt < s.catchAlt)) return;
     if (p.kind === 'turtle') {
@@ -1183,8 +1209,33 @@ const toScreenX = x => W / 2 + (x - cam.x) * cam.zoom;
 const toScreenY = alt => H / 2 - (alt - cam.alt) * cam.zoomY;
 
 // ---------- Update ----------
+function updateParticles(dt) {
+  for (const pt of particles) {
+    pt.x += pt.vx * dt; pt.alt += pt.vy * dt; pt.vy -= G * dt * 0.5; pt.life -= dt;
+  }
+  particles = particles.filter(p => p.life > 0);
+}
+
+function updateCrash(dt) {
+  const crash = state.crash;
+  crash.t += dt;
+  for (const puff of crash.smoke) {
+    puff.x += puff.vx * dt;
+    puff.alt += puff.vy * dt;
+    puff.vx *= Math.exp(-dt * 1.5);
+    puff.radius += dt * 5;
+    puff.life -= dt;
+  }
+  crash.smoke = crash.smoke.filter(puff => puff.life > 0);
+  updateParticles(dt);
+}
+
 function update(dt) {
-  if (state.over || paused) return;
+  if (paused) return;
+  if (state.over) {
+    if (state.crash) updateCrash(dt);
+    return;
+  }
 
   // Steering: turn toward the mouse (relative to the lens when the bird is above the screen)
   const { x: bx, y: by } = birdAnchor();
@@ -1272,6 +1323,7 @@ function update(dt) {
   bird.alt += gvy * dt;
 
   bird.mode = braking ? 'BRAKE' : diving ? 'DIVE' : flapping ? 'FLAP' : bird.speed < STALL_SPEED ? 'STALL' : 'GLIDE';
+  updateHearingRange(dt);
   const prevBeat = Math.floor(bird.flapT / (Math.PI * 2));
   bird.flapT += dt * (flapping ? 14 : 0);
   // Sound rings: one per wingbeat while flapping, a steady hiss while braking, wind roar in a fast dive
@@ -1292,6 +1344,15 @@ function update(dt) {
   if (bird.alt <= 0) {
     if (-bird.vy > SAFE_VSPEED) {
       state.over = true;
+      state.crash = {
+        t: 0,
+        smoke: Array.from({ length: 18 }, () => {
+          const life = 1.8 + Math.random() * 0.7;
+          return { x: bird.x + (Math.random() - 0.5) * 5, alt: 1 + Math.random() * 2,
+                   vx: (Math.random() - 0.5) * 14, vy: 5 + Math.random() * 10,
+                   radius: 2 + Math.random() * 4, life, maxLife: life };
+        })
+      };
       state.msg = `CRASHED at ${(bird.speed * 3.6).toFixed(0)} km/h — click to retry`;
       for (let i = 0; i < 40; i++) particles.push({
         x: bird.x, alt: 0, vx: (Math.random() - 0.5) * 30, vy: Math.random() * 20, life: 1.5
@@ -1332,10 +1393,7 @@ function update(dt) {
   spawnPreyAhead();
 
   // Particles
-  for (const pt of particles) {
-    pt.x += pt.vx * dt; pt.alt += pt.vy * dt; pt.vy -= G * dt * 0.5; pt.life -= dt;
-  }
-  particles = particles.filter(p => p.life > 0);
+  updateParticles(dt);
   for (const r of state.rings) r.t += dt;
   state.rings = state.rings.filter(r => r.t < 0.8);
   state.msgT -= dt;
@@ -1830,39 +1888,46 @@ function drawSpecies(kind, x, y, p, s) {
 }
 
 function drawAlert(x, y, ch = '!', alpha = 1, reason = 'sound') {
-  const palette = { sight: '#d62828', sound: '#ffdd55', shadow: '#ffdd55' };
-  const normalizedReason = reason === 'shadow' ? 'sound' : (reason || 'sound');
+  const palette = { sight: '#d62828', sound: '#ffdd55', shadow: '#d62828' };
   ctx.globalAlpha = alpha;
   ctx.font = 'bold 18px sans-serif'; ctx.textAlign = 'center';
   ctx.strokeStyle = '#000'; ctx.lineWidth = 3; ctx.strokeText(ch, x, y);
-  ctx.fillStyle = ch === '!' ? palette[normalizedReason] || '#ffdd55' : '#fff'; ctx.fillText(ch, x, y);
+  ctx.fillStyle = ch === '!' ? palette[reason] || '#ffdd55' : '#fff'; ctx.fillText(ch, x, y);
   ctx.globalAlpha = 1;
 }
 
 // "!" when spooked, a fading-in "?" while the animal is noticing you
+function preyHasAlert(p) {
+  if (p.hidden || p.gone) return false;
+  if (p.spent) return (p.fadeT ?? 0) > 0;
+  return p.alertT > 0 || p.fleeing || p.spookT > 0 || p.scatterT > 0;
+}
+
 function drawAwareness(p, x, y) {
-  const reason = p.lastSense === 'shadow' ? 'sound' : (p.lastSense || 'sound');
+  if (p.hidden || p.gone) return;
+  const reason = p.lastSense || 'sound';
   const alertAlpha = p.spent ? Math.max(0, Math.min(1, p.fadeT ?? 1)) : 1;
-  if (p.alertT > 0 || (p.spent && (p.fadeT ?? 0) > 0)) drawAlert(x, y, '!', alertAlpha, reason);
+  if (preyHasAlert(p)) drawAlert(x, y, '!', alertAlpha, reason);
   else if (p.aware > 0 && SENSES[p.kind]) drawAlert(x, y, '?', Math.min(1, 0.3 + p.aware / SENSES[p.kind].reaction), reason);
 }
 
 function drawPrey(p) {
   const s = SPECIES[p.kind];
   const sx = toScreenX(p.x);
+  if (p.kind === 'mouse') {
+    const hx = toScreenX(p.home), gy = toScreenY(0);
+    if (hx >= -20 && hx <= W + 20) {
+      ctx.fillStyle = '#6b4f30';
+      ctx.beginPath(); ctx.ellipse(hx, gy, 14, 4.5, 0, Math.PI, 0); ctx.fill();
+      ctx.fillStyle = '#2b1d10';
+      ctx.beginPath(); ctx.ellipse(hx, gy - 0.5, 7, 2.5, 0, 0, Math.PI * 2); ctx.fill();
+    }
+  }
   if (sx < -150 || sx > W + 150) return;
   if (p.hidden) return;
   drawPreySenseIndicators(p);
   if (!s.air) {
     const gy = toScreenY(0);
-    if (p.kind === 'squirrel') {
-      const hx = toScreenX(p.home);
-      ctx.fillStyle = '#6b4f30';
-      ctx.beginPath(); ctx.ellipse(hx, gy, 14, 4.5, 0, Math.PI, 0); ctx.fill();
-      ctx.fillStyle = '#2b1d10';
-      ctx.beginPath(); ctx.ellipse(hx, gy - 0.5, 7, 2.5, 0, 0, Math.PI * 2); ctx.fill();
-      if (p.hidden) return;
-    }
     ctx.globalAlpha = p.spent ? Math.max(0, Math.min(1, p.fadeT)) : 1;
     drawSprite(p.kind, sx, gy, p, animalScaleFor(p.kind));
     ctx.globalAlpha = 1;
@@ -1880,7 +1945,7 @@ function drawPrey(p) {
     drawSprite(p.kind, sx, toScreenY(p.alt), p, animalScaleFor(p.kind));
     ctx.globalAlpha = 1;
   }
-  if (!p.combo) drawAwareness(p, sx, toScreenY(p.alt) - 20);
+  drawAwareness(p, sx, toScreenY(p.alt) - 20);
 }
 
 // ---------- Sprite cache ----------
@@ -2172,7 +2237,8 @@ function drawPreyIndicators() {
   const label = `${best.toFixed(0)} m`;
   const rx = toScreenX(near.x), ry = s.air ? toScreenY(near.alt) : toScreenY(0) - 10;
   if (rx >= 0 && rx <= W && ry >= 0 && ry <= H) {
-    drawArrow(rx, ry - (s.air ? 18 : 14), 0, 1);
+    const awarenessOffset = preyHasAlert(near) || near.aware > 0 ? 32 : 0;
+    drawArrow(rx, ry - (s.air ? 18 : 14) - awarenessOffset, 0, 1);
     return;
   }
   const { x: bx, y: by } = birdAnchor();
@@ -2271,7 +2337,7 @@ function drawHUD() {
   ctx.fillStyle = '#fff'; ctx.font = '12px monospace'; ctx.textAlign = 'right';
   ctx.fillText(`${barM} m`, W - 20, H - 44);
 
-  if (state.msgT > 0 || state.over) {
+  if ((state.msgT > 0 || state.over) && (!state.crash || state.crash.t >= CRASH_REVEAL_DELAY)) {
     ctx.fillStyle = state.over ? '#ff5555' : '#ffffff';
     ctx.font = 'bold 24px sans-serif'; ctx.textAlign = 'center';
     ctx.fillText(state.msg, W / 2, H / 2 - 80);
@@ -2551,7 +2617,7 @@ function drawDetectionZones() {
   const hear = hearingRange();
   for (const p of prey) {
     const sn = SENSES[p.kind];
-    if (!sn || p.gone || p.hidden || p.spent || p.fleeing || p.spookT > 0 || p.scatterT > 0) continue;
+    if (!sn || IGNORE_DETECTION.has(p.kind) || p.gone || p.hidden || p.spent || p.fleeing || p.spookT > 0 || p.scatterT > 0) continue;
     const a = Math.max(0, 1 - Math.abs(p.x - bird.x) / 400);
     if (a <= 0.02) continue;
     const ex = toScreenX(p.x), ey = toScreenY(eyeAlt(p));
@@ -2651,6 +2717,20 @@ function drawAtmosphere() {
   if (s.flash > 0) { ctx.fillStyle = `rgba(255,255,255,${s.flash * 4})`; ctx.fillRect(0, 0, W, H); }
 }
 
+function drawCrashSmoke() {
+  if (!state.crash) return;
+  ctx.save();
+  for (const puff of state.crash.smoke) {
+    const age = puff.maxLife - puff.life;
+    ctx.globalAlpha = Math.min(1, age / 0.12) * Math.max(0, puff.life / puff.maxLife) * 0.65;
+    ctx.fillStyle = '#aaa49b';
+    ctx.beginPath();
+    ctx.ellipse(toScreenX(puff.x), toScreenY(puff.alt), puff.radius * cam.zoom, puff.radius * cam.zoomY, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
 function draw() {
   ctx.save();
   if (!state.over && !paused && cam.shake > 0) {
@@ -2666,6 +2746,7 @@ function draw() {
   drawSoundRings();
   ctx.fillStyle = '#ccc';
   for (const p of particles) ctx.fillRect(toScreenX(p.x), toScreenY(p.alt), 3, 3);
+  drawCrashSmoke();
   if (!state.over) drawBird();
   ctx.restore();
   drawAtmosphere();
@@ -2685,6 +2766,10 @@ function draw() {
   drawClosingHint();
   drawBirdLens();
   drawSunIndicator();
+  if (state.crash && state.crash.t >= CRASH_REVEAL_DELAY) {
+    ctx.fillStyle = `rgba(0,0,0,${Math.min(1, (state.crash.t - CRASH_REVEAL_DELAY) / 0.5) * 0.35})`;
+    ctx.fillRect(0, 0, W, H);
+  }
   drawHUD();
   if (paused) {
     drawPausePanel();
