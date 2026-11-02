@@ -100,10 +100,11 @@ export const RICOCHET_RANGE = 80;
 // Hunter rifle per Rifle tier: shots per gun, range (m), hit width (m), radius that spooks animals (m)
 export const GUN_LEVELS = ['Straight ahead', 'Double shot', 'Free aim', 'Six-shooter', 'Auto-fire (hold)', 'Bazooka (14 m blast)'];
 export const GUN_STATS = { ammo: [1, 2, 2, 6, 30, 8], range: [220, 240, 280, 320, 320, 400], width: [2.5, 2.5, 3, 3, 2.5, 3], spook: [150, 150, 150, 120, 120, 200] };
+export const GUN_HUNTER_HIT_RADIUS = 6;
 // Springy Legs: bounces per day (tier 3 = unlimited). A bounce reflects you off the ground like a ball: you leave
 // at the mirror of your impact angle, at BOUNCE_LIFT × your impact speed (so faster crashes fly higher; at least
-// BOUNCE_MIN_UP m/s upward). For the first BOUNCE_LOCK s the arc is uncontrollable; after that you can steer a
-// little (BOUNCE_STEER m/s² toward the cursor) and normal flight returns at the top of the arc.
+// BOUNCE_MIN_UP m/s upward). For the first BOUNCE_LOCK s the arc is uncontrollable; over the next second you
+// gradually regain steering (BOUNCE_STEER m/s² toward the cursor), and normal flight returns at the top of the arc.
 // Tier 2+: you spin like a buzzsaw instead, taking out anything within SPIN_R m, until you brake
 export const BOUNCES = [0, 3, 3, Infinity, Infinity], BOUNCE_LIFT = 0.85, BOUNCE_MIN_UP = 35, BOUNCE_LOCK = 1;
 export const BOUNCE_STEER = 6, BOUNCE_DRAG = 0.05, SPIN_R = 5, SPIN_RATE = 18;

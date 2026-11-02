@@ -1,4 +1,5 @@
-import { G, DIVE_SPEED, SAFE_VSPEED, CRASH_REVEAL_DELAY, BRAKE_UNLOCK, SHELL_CRACK_SPEED, LENS_R, PAUSE_BTN, DUSK_WARN_HOUR, CHAIN_TIME, ESCAPE_V, SPECIES, ICON_SCALE, OUTLINE } from '../config.js';
+import { G, DIVE_SPEED, SAFE_VSPEED, CRASH_REVEAL_DELAY, BRAKE_UNLOCK, SHELL_CRACK_SPEED, LENS_R, PAUSE_BTN, DUSK_WARN_HOUR, CHAIN_TIME, ESCAPE_V, SPECIES, HAZARD_NAME, ICON_SCALE, OUTLINE } from '../config.js';
+import { wrapText } from './text.js';
 
 export function createHud({ session, viewport, systems }) {
   function drawArrow(tipX, tipY, ux, uy) {
@@ -71,12 +72,27 @@ export function createHud({ session, viewport, systems }) {
 
     viewport.ctx.font = '14px sans-serif';
     viewport.ctx.fillStyle = 'rgba(255,255,255,0.85)';
-    viewport.ctx.fillText('Click anywhere or press P / Esc to resume', viewport.W / 2, viewport.H / 2 + 22);
+    viewport.ctx.fillText('Click outside the options or press P / Esc to resume', viewport.W / 2, viewport.H / 2 + 22);
+
+    viewport.ctx.fillStyle = '#ffffff';
+    viewport.ctx.font = 'bold 13px sans-serif';
+    viewport.ctx.fillText('Graphics resolution', viewport.W / 2, viewport.H / 2 + 60);
+    for (const option of systems.settings.graphicsOptions()) {
+      viewport.ctx.fillStyle = option.selected ? '#ffd34d' : '#2c4b69';
+      viewport.ctx.fillRect(option.x, option.y, option.width, option.height);
+      viewport.ctx.strokeStyle = option.selected ? '#fff1b8' : 'rgba(255,255,255,0.5)';
+      viewport.ctx.lineWidth = option.selected ? 2 : 1;
+      viewport.ctx.strokeRect(option.x + 0.5, option.y + 0.5, option.width - 1, option.height - 1);
+      viewport.ctx.fillStyle = option.selected ? '#2a1d00' : '#ffffff';
+      viewport.ctx.font = 'bold 11px sans-serif';
+      viewport.ctx.fillText(option.label, option.x + option.width / 2, option.y + option.height / 2 + 4);
+    }
   }
 
   function drawHUD() {
     // On the way to the moon only the messages and toasts stay up
     if (session.state.moonshot) { if (session.state.moonshot.landed) drawCatchLog(); drawHudMessages(); return; }
+    const noticeBottom = drawHudMessages();
     // Altitude meter (sqrt scale so low altitudes stay readable)
     const mx = 40, top = 80, bottom = viewport.H - 60;
     const altY = a => bottom - Math.sqrt(Math.min(1, Math.max(0, a) / session.MAX_ALT)) * (bottom - top);
@@ -99,17 +115,7 @@ export function createHud({ session, viewport, systems }) {
     viewport.ctx.fillStyle = session.bird.alt > session.MAX_ALT ? '#66ccff' : '#ffdd55'; viewport.ctx.textAlign = 'left';
     viewport.ctx.fillText(altLabel, mx + 29, ay + 4);
 
-    if (session.bird.carrying && session.bird.carrying.kind === 'gun') {
-      const text = systems.combat.gunAuto() ? 'Hold right-click to spray · Space drops'
-        : systems.combat.gunFreeAim() ? 'Hold right-click: course holds, cursor aims · release fires · Space drops'
-        : 'Hold right-click: fires straight ahead on release · Space drops';
-      viewport.ctx.font = 'bold 14px sans-serif'; viewport.ctx.textAlign = 'center';
-      const tw = viewport.ctx.measureText(text).width + 24;
-      viewport.ctx.fillStyle = 'rgba(0,0,0,0.5)';
-      viewport.ctx.fillRect(viewport.W / 2 - tw / 2, 14, tw, 26);
-      viewport.ctx.fillStyle = '#ffdd55';
-      viewport.ctx.fillText(text, viewport.W / 2, 32);
-    } else if (session.bird.carrying) {
+    if (session.bird.carrying && session.bird.carrying.kind !== 'gun') {
       // Marker: the lowest altitude from which a release at your current speed would still crack the shell
       const needH = (SHELL_CRACK_SPEED ** 2 - session.bird.vx ** 2 - session.bird.vy ** 2) / (2 * G);
       if (needH > 0) {
@@ -117,28 +123,21 @@ export function createHud({ session, viewport, systems }) {
         viewport.ctx.strokeStyle = '#7fd67f'; viewport.ctx.lineWidth = 3;
         viewport.ctx.beginPath(); viewport.ctx.moveTo(mx - 4, dy); viewport.ctx.lineTo(mx + 14, dy); viewport.ctx.stroke();
       }
-      const impact = systems.combat.predictImpact(session.bird.alt, session.bird.vx, session.bird.vy);
-      const ready = impact >= SHELL_CRACK_SPEED;
-      const est = systems.session.priceCatch('turtle', { impact }, true).value;
-      const how = 'hold right-click to aim, release to throw · Space drops';
-      const text = ready
-        ? `Drop now: ~${(impact * 3.6).toFixed(0)} km/h impact (~$${est})  ·  ${how}`
-        : `Turtle would hit at ~${(impact * 3.6).toFixed(0)} km/h — need ${(SHELL_CRACK_SPEED * 3.6).toFixed(0)}. Climb or dive faster`;
-      viewport.ctx.font = 'bold 15px sans-serif'; viewport.ctx.textAlign = 'center';
-      const tw = viewport.ctx.measureText(text).width + 24;
-      viewport.ctx.fillStyle = 'rgba(0,0,0,0.6)';
-      viewport.ctx.fillRect(viewport.W / 2 - tw / 2, 14, tw, 28);
-      viewport.ctx.fillStyle = ready ? '#7fd67f' : '#fff';
-      viewport.ctx.fillText(text, viewport.W / 2, 33);
     }
 
-    // Readouts: top-left, beside the altitude tape, so the ground below stays clear
-    const SR = 64, scx = 214, scy = 62 + 33 + SR, gunHeld = session.bird.carrying && session.bird.carrying.kind === 'gun';
+    // Keep flight instruments bottom-left, beside the altitude tape.
+    const narrow = viewport.W < 720;
+    const SR = narrow ? 44 : 64, scx = narrow ? 140 : 162, scy = viewport.H - SR - 108, gunHeld = session.bird.carrying && session.bird.carrying.kind === 'gun';
     drawSpeedometer(scx, scy, SR);
-    const panelX = scx + SR + 40, panelY = scy - SR - 8;
-    if (gunHeld) drawAmmo(panelX, panelY);
-    drawPerks(gunHeld ? panelX + 128 : panelX, panelY);
-    drawCatchLog();
+    const perks = perkRows();
+    viewport.ctx.font = 'bold 12px sans-serif';
+    const perkLines = perks.map(([text, color]) => [wrapText(viewport.ctx, text, 154), color]);
+    const perkHeight = perkLines.reduce((height, [lines]) => height + lines.length * 16 + 10, 0);
+    const ammoHeight = gunHeld ? (narrow ? 38 : 142) : 0;
+    const logBottom = drawCatchLog(noticeBottom, perkHeight + ammoHeight);
+    const panelX = viewport.W - 184, panelY = Math.max(noticeBottom + 12, logBottom + 12);
+    if (gunHeld) drawAmmo(panelX, panelY, narrow);
+    drawPerks(panelX, panelY + ammoHeight, perkLines);
 
     // Scale bar
     const barM = systems.renderer.niceStep(100 / session.cam.zoom), barPx = barM * session.cam.zoom;
@@ -149,36 +148,69 @@ export function createHud({ session, viewport, systems }) {
     viewport.ctx.stroke();
     viewport.ctx.fillStyle = '#fff'; viewport.ctx.font = '12px monospace'; viewport.ctx.textAlign = 'right';
     viewport.ctx.fillText(`${barM} m`, viewport.W - 20, viewport.H - 44);
-    drawHudMessages();
   }
 
-  // Centre message and the toast banner
+  // Notifications share a bounded upper-screen lane, leaving the bird unobscured.
   function drawHudMessages() {
+    let y = 52;
+    const width = Math.min(600, viewport.W - 32);
+    function banner(text, color) {
+      viewport.ctx.font = 'bold 13px sans-serif'; viewport.ctx.textAlign = 'center';
+      const lines = wrapText(viewport.ctx, text, width - 24);
+      const height = lines.length * 17 + 12;
+      viewport.ctx.fillStyle = 'rgba(12,20,34,0.9)';
+      viewport.ctx.fillRect((viewport.W - width) / 2, y, width, height);
+      viewport.ctx.fillStyle = color;
+      lines.forEach((line, i) => viewport.ctx.fillText(line, viewport.W / 2, y + 20 + i * 17));
+      y += height + 6;
+    }
     if ((session.state.msgT > 0 || session.state.over) && (!session.state.crash || session.state.crash.t >= CRASH_REVEAL_DELAY) && !(session.state.moonshot && session.state.over)) {
-      viewport.ctx.fillStyle = session.state.over ? '#ff5555' : '#ffffff';
-      viewport.ctx.font = 'bold 24px sans-serif'; viewport.ctx.textAlign = 'center';
-      viewport.ctx.fillText(session.state.msg, viewport.W / 2, viewport.H / 2 - 80);
-      if (session.state.msgTags && session.state.msgTagsFor === session.state.msg) {
-        viewport.ctx.fillStyle = '#ffdd55'; viewport.ctx.font = 'bold 14px sans-serif';
-        viewport.ctx.fillText(session.state.msgTags, viewport.W / 2, viewport.H / 2 - 56);
-      }
+      banner(session.state.msg, session.state.over ? '#ff7766' : '#fff');
     }
     if (session.state.toast && session.state.toast.t > 0) {
       viewport.ctx.globalAlpha = Math.min(1, session.state.toast.t);
-      viewport.ctx.font = 'bold 16px sans-serif'; viewport.ctx.textAlign = 'center';
-      const tw = viewport.ctx.measureText(session.state.toast.text).width + 30;
-      viewport.ctx.fillStyle = 'rgba(40,30,0,0.85)';
-      viewport.ctx.fillRect(viewport.W / 2 - tw / 2, 52, tw, 32);
-      viewport.ctx.strokeStyle = '#ffd34d'; viewport.ctx.lineWidth = 2;
-      viewport.ctx.strokeRect(viewport.W / 2 - tw / 2, 52, tw, 32);
-      viewport.ctx.fillStyle = '#ffd34d';
-      viewport.ctx.fillText(session.state.toast.text, viewport.W / 2, 74);
+      banner(session.state.toast.text, '#ffd34d');
       viewport.ctx.globalAlpha = 1;
     }
+    const caught = session.state.lastCatch;
+    const age = caught ? session.state.time - caught.t : Infinity;
+    if (caught && age < 4 && !session.state.over) {
+      viewport.ctx.globalAlpha = Math.min(1, 4 - age);
+      const kind = caught.targetKind || caught.kind;
+      const name = SPECIES[kind]?.name || HAZARD_NAME[kind] || 'Buzzard';
+      banner(`${caught.label || name}${caught.count > 1 ? ` ×${caught.count}` : ''}  +$${caught.pts}`, '#fff');
+      if (caught.tags.length) {
+        viewport.ctx.font = '12px sans-serif'; viewport.ctx.textAlign = 'center';
+        const lines = wrapText(viewport.ctx, caught.tags.join(' · '), width - 24);
+        const height = lines.length * 17 + 12;
+        // Join the modifier rows to their catch heading, not to the warning above it.
+        y -= 6;
+        viewport.ctx.fillStyle = 'rgba(12,20,34,0.9)';
+        viewport.ctx.fillRect((viewport.W - width) / 2, y, width, height);
+        viewport.ctx.fillStyle = '#ffdd55';
+        lines.forEach((line, i) => viewport.ctx.fillText(line, viewport.W / 2, y + 17 + i * 17));
+        y += height + 6;
+      }
+      viewport.ctx.globalAlpha = 1;
+    }
+    if (y === 52 && !session.state.over && session.bird.carrying) {
+      if (session.bird.carrying.kind === 'gun') {
+        banner(systems.combat.gunAuto() ? 'Right-click: spray · Space: drop' : systems.combat.gunFreeAim()
+          ? 'Right-click: aim, release: fire · Space: drop'
+          : 'Right-click, release: fire ahead · Space: drop', '#ffdd55');
+      } else {
+        const impact = systems.combat.predictImpact(session.bird.alt, session.bird.vx, session.bird.vy);
+        const ready = impact >= SHELL_CRACK_SPEED;
+        const est = systems.session.priceCatch('turtle', { impact }, true).value;
+        banner(ready ? `Turtle ready · ~$${est} · Right-click: throw · Space: drop`
+          : `Turtle: ${(impact * 3.6).toFixed(0)}/${(SHELL_CRACK_SPEED * 3.6).toFixed(0)} km/h impact · Climb or dive faster`, ready ? '#7fd67f' : '#fff');
+      }
+    }
+    return y;
   }
 
   // Small badges for the whacky upgrades: eyas call state, lucky feathers and bounces left
-  function drawPerks(x, y) {
+  function perkRows() {
     const rows = [];
     if (systems.progression.tier('lucky')) rows.push([`Lucky feather ×${session.state.feathers}`, session.state.feathers ? '#fff1b8' : '#9aa7b8']);
     if (systems.progression.tier('bounce')) rows.push([session.state.bounces === Infinity ? 'Springy legs ∞' : `Springy legs ×${session.state.bounces}`, session.state.bounces ? '#b8f1c8' : '#9aa7b8']);
@@ -189,18 +221,32 @@ export function createHud({ session, viewport, systems }) {
     if (systems.progression.tier('eyas') && session.state.eyases) {
       const hunting = session.state.eyases.filter(e => e.mode === 'chase').length;
       rows.push([session.state.eyasHunt ? `E · Eyases hunting${hunting ? ` (${hunting} out)` : ''}` : 'E · Eyases held back', session.state.eyasHunt ? '#d9a46a' : '#9aa7b8']);
+      if (systems.progression.tier('eyasgun') || session.state.eyases.some(e => e.ammo > 0)) {
+        rows.push([`Eyas ammo: ${session.state.eyases.map(e => e.ammo).join(' / ')}`, session.state.eyases.some(e => e.ammo > 0) ? '#ffdd55' : '#9aa7b8']);
+      }
     }
-    rows.forEach(([text, col], i) => {
-      const ry = y + i * 26;
-      viewport.ctx.fillStyle = 'rgba(0,0,0,0.55)'; viewport.ctx.fillRect(x, ry, 170, 22);
+    return rows;
+  }
+
+  function drawPerks(x, y, rows) {
+    rows.forEach(([lines, col]) => {
+      const height = lines.length * 16 + 6;
+      viewport.ctx.fillStyle = 'rgba(0,0,0,0.55)'; viewport.ctx.fillRect(x, y, 170, height);
       viewport.ctx.fillStyle = col; viewport.ctx.font = 'bold 12px sans-serif'; viewport.ctx.textAlign = 'left';
-      viewport.ctx.fillText(text, x + 8, ry + 15);
+      lines.forEach((text, i) => viewport.ctx.fillText(text, x + 8, y + 15 + i * 16));
+      y += height + 4;
     });
   }
 
-  // Ammo panel beside the brake bar: weapon, then one round per shot left (a bar + count for the 30-round drum)
-  function drawAmmo(x, y) {
+  // Weapon and ammunition share the right-side status column.
+  function drawAmmo(x, y, compact = false) {
     const g = session.bird.carrying, max = systems.combat.gunStat('ammo'), n = g.ammo, style = systems.renderer.gunStyle();
+    if (compact) {
+      viewport.ctx.fillStyle = 'rgba(0,0,0,0.55)'; viewport.ctx.fillRect(x, y, 170, 32);
+      viewport.ctx.fillStyle = '#ffdd55'; viewport.ctx.font = 'bold 13px monospace'; viewport.ctx.textAlign = 'left';
+      viewport.ctx.fillText(`${style === 2 ? 'Rockets' : 'Ammo'}: ${n}/${max}`, x + 8, y + 21);
+      return;
+    }
     const w = 118, h = 136;
     viewport.ctx.fillStyle = 'rgba(0,0,0,0.55)'; viewport.ctx.fillRect(x, y, w, h);
     viewport.ctx.strokeStyle = n <= Math.max(1, max * 0.2) ? '#ff7766' : 'rgba(255,221,85,0.5)'; viewport.ctx.lineWidth = 1;
@@ -232,19 +278,18 @@ export function createHud({ session, viewport, systems }) {
     const ang = kmh => A0 + SWEEP * Math.min(kmh, MAX_KMH) / MAX_KMH;
     const kmh = session.bird.speed * 3.6;
 
-    // Brake energy: vertical bar to the right of the dial
-    const bx = cx + r + 18, bh = r * 1.6, btop = cy - bh / 2;
+    const focusWidth = r * 2, focusX = cx - r, focusY = cy + r + 68;
     viewport.ctx.fillStyle = 'rgba(0,0,0,0.55)';
-    viewport.ctx.fillRect(bx - 6, btop - 4, 12, bh + 8);
+    viewport.ctx.fillRect(focusX - 4, focusY - 4, focusWidth + 8, 18);
     viewport.ctx.fillStyle = session.bird.brakeLocked ? '#ff5544' : '#66ccff';
-    viewport.ctx.fillRect(bx - 3, btop + bh * (1 - session.bird.brakeE), 6, bh * session.bird.brakeE);
+    viewport.ctx.fillRect(focusX, focusY, focusWidth * session.bird.brakeE, 10);
     if (session.bird.brakeLocked) {
       viewport.ctx.strokeStyle = '#ffdd55'; viewport.ctx.lineWidth = 1;
-      const uy = btop + bh * (1 - BRAKE_UNLOCK);
-      viewport.ctx.beginPath(); viewport.ctx.moveTo(bx - 6, uy); viewport.ctx.lineTo(bx + 6, uy); viewport.ctx.stroke();
+      const unlockX = focusX + focusWidth * BRAKE_UNLOCK;
+      viewport.ctx.beginPath(); viewport.ctx.moveTo(unlockX, focusY - 4); viewport.ctx.lineTo(unlockX, focusY + 14); viewport.ctx.stroke();
     }
     viewport.ctx.fillStyle = '#cfe6f7'; viewport.ctx.font = '9px monospace'; viewport.ctx.textAlign = 'center';
-    viewport.ctx.fillText('BRK', bx, btop + bh + 16);
+    viewport.ctx.fillText('FOCUS', cx, focusY + 26);
 
     // Wind at the bird's altitude: arrow length and label above the dial
     const w = systems.world.windX(session.bird.alt), wy = cy - r - 24;
@@ -270,7 +315,7 @@ export function createHud({ session, viewport, systems }) {
 
     viewport.ctx.strokeStyle = '#fff'; viewport.ctx.fillStyle = '#fff';
     viewport.ctx.font = '10px monospace'; viewport.ctx.textAlign = 'center';
-    const labelStep = MAX_KMH > 480 ? 120 : 60;
+    const labelStep = r < 56 || MAX_KMH > 480 ? 120 : 60;
     for (let v = 0; v <= MAX_KMH; v += 20) {
       const a = ang(v), major = v % 60 === 0;
       const r0 = r - (major ? 18 : 12);
@@ -279,7 +324,8 @@ export function createHud({ session, viewport, systems }) {
       viewport.ctx.moveTo(cx + Math.cos(a) * r0, cy + Math.sin(a) * r0);
       viewport.ctx.lineTo(cx + Math.cos(a) * (r - 8), cy + Math.sin(a) * (r - 8));
       viewport.ctx.stroke();
-      if (v % labelStep === 0) viewport.ctx.fillText(v, cx + Math.cos(a) * (r - 28), cy + Math.sin(a) * (r - 28) + 3);
+      const labelR = r - (r < 56 ? 20 : 28);
+      if (v % labelStep === 0) viewport.ctx.fillText(v, cx + Math.cos(a) * labelR, cy + Math.sin(a) * labelR + 3);
     }
 
     // Session max marker
@@ -380,16 +426,16 @@ export function createHud({ session, viewport, systems }) {
     if (turtleHit) systems.sprites.drawTurtle(ix + 9 * k, iy + 15 * k, { vx: 1 }, 0.7 * k);
   }
 
-  function drawCatchLog() {
+  function drawCatchLog(noticeBottom = 52, statusHeight = 0) {
     const log = session.state.catchLog;
     const right = viewport.W - 14;
     viewport.ctx.textAlign = 'right';
     viewport.ctx.fillStyle = '#ffdd55'; viewport.ctx.font = 'bold 18px sans-serif';
     viewport.ctx.fillText(`DAY ${session.state.day}  ·  TODAY $${session.state.score}`, right, 28);
     // Catch cards stack top-down in a column on the right, newest on top
-    const CW = 92, CH = 50, GAP = 6, top = 38, x = right - CW;
-    const maxCards = Math.max(1, Math.floor((viewport.H * 0.5) / (CH + GAP)));
-    const shown = log.slice(-maxCards).reverse();
+    const CW = 92, CH = 50, GAP = 6, top = viewport.W < 720 ? Math.max(210, noticeBottom + 12) : 38, x = right - CW;
+    const maxCards = Math.max(0, Math.floor(Math.min(viewport.H * 0.5, viewport.H - top - statusHeight - 130) / (CH + GAP)));
+    const shown = maxCards ? log.slice(-maxCards).reverse() : [];
     let y = top + shown.length * (CH + GAP);
     if (log.length > shown.length) {
       viewport.ctx.fillStyle = '#ddd'; viewport.ctx.font = 'bold 13px sans-serif'; viewport.ctx.textAlign = 'right';
@@ -405,8 +451,10 @@ export function createHud({ session, viewport, systems }) {
       viewport.ctx.fillText(`CHAIN ×${chain.toFixed(1)}`, right, y + 12);
       viewport.ctx.fillStyle = 'rgba(0,0,0,0.5)'; viewport.ctx.fillRect(right - 90, y + 18, 90, 5);
       viewport.ctx.fillStyle = '#ff9f40'; viewport.ctx.fillRect(right - 90 * left, y + 18, 90 * left, 5);
+      y += 30;
     }
 
+    const bottom = y;
     y = top;
     for (const c of shown) {
       const fresh = session.state.time - c.t < 1.5;
@@ -434,6 +482,7 @@ export function createHud({ session, viewport, systems }) {
       viewport.ctx.fillText(`$${c.pts}`, x + 34, y + 40);
       y += CH + GAP;
     }
+    return bottom;
   }
 
   function drawPauseButton() {

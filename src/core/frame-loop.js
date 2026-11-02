@@ -2,6 +2,7 @@ export function createFrameLoop({
   update,
   render,
   isPaused = () => false,
+  onFrame = () => {},
   maxFps = 60,
   requestFrame = callback => requestAnimationFrame(callback),
   cancelFrame = handle => cancelAnimationFrame(handle),
@@ -11,12 +12,15 @@ export function createFrameLoop({
   let handle = null;
   let last = null;
   let previousUpdate = null;
+  let previousFrame = null;
   let dirty = true;
   let running = false;
 
   function frame(now) {
     handle = null;
     if (!running) return;
+    const frameElapsed = previousFrame === null ? 0 : now - previousFrame;
+    previousFrame = now;
     const elapsed = last === null ? interval : now - last;
     if (elapsed + 0.1 >= interval) {
       last = now - Math.max(0, elapsed - interval * Math.floor((elapsed + 0.1) / interval));
@@ -31,6 +35,7 @@ export function createFrameLoop({
         dirty = false;
       }
     }
+    onFrame(now, frameElapsed);
     if (running && !isPaused()) handle = requestFrame(frame);
   }
 
@@ -40,6 +45,7 @@ export function createFrameLoop({
       running = true;
       last = null;
       previousUpdate = null;
+      previousFrame = null;
       dirty = true;
       handle = requestFrame(frame);
     },
@@ -49,12 +55,14 @@ export function createFrameLoop({
       handle = null;
       last = null;
       previousUpdate = null;
+      previousFrame = null;
     },
     invalidate() {
       dirty = true;
       if (running && handle === null) {
         last = null;
         previousUpdate = null;
+        previousFrame = null;
         handle = requestFrame(frame);
       }
     },

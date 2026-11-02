@@ -171,20 +171,24 @@ export function createFlight({ session, viewport, systems }) {
       session.bird.speed = Math.max(0.3, Math.hypot(wvx, wvy));
       session.bird.angle = Math.atan2(wvy, wvx);
     } else if (session.bird.bouncing) {
-      // Springy Legs bounce: a ballistic arc; after the first BOUNCE_LOCK s you can steer a little toward the cursor
+      // Springy Legs bounce: a ballistic arc, then steering gradually returns over one second
       let bvx = Math.cos(session.bird.angle) * session.bird.speed, bvy = Math.sin(session.bird.angle) * session.bird.speed;
       bvy -= G * dt;
-      session.bird.bouncing.lockT = (session.bird.bouncing.lockT || 0) - dt;
+      const lockT = session.bird.bouncing.lockT || 0;
+      session.bird.bouncing.lockT = lockT - dt;
       const free = session.bird.bouncing.lockT <= 0;
+      const controlDt = Math.max(0, dt - Math.max(lockT, 0));
+      const control = free ? clamp((session.bird.bouncing.controlT || 0) + controlDt, 0, 1) : 0;
+      session.bird.bouncing.controlT = control;
       const ballisticVy = bvy;
-      const steer = !free ? 0 : session.bird.bouncing.spin ? SPIN_STEER : BOUNCE_STEER;
-      bvx += Math.cos(target) * steer * effort * dt;
-      bvy += Math.sin(target) * steer * effort * dt;
+      const steer = session.bird.bouncing.spin ? SPIN_STEER : BOUNCE_STEER;
+      bvx += Math.cos(target) * steer * effort * control * dt;
+      bvy += Math.sin(target) * steer * effort * control * dt;
       if (session.bird.bouncing.spin && free) {
         // The buzzsaw also swings its heading toward the cursor without gaining speed
         const sp = Math.hypot(bvx, bvy), a = Math.atan2(bvy, bvx);
         let da = target - a; da = Math.atan2(Math.sin(da), Math.cos(da));
-        const na = a + clamp(da, -SPIN_TURN * effort * dt, SPIN_TURN * effort * dt);
+        const na = a + clamp(da, -SPIN_TURN * effort * control * dt, SPIN_TURN * effort * control * dt);
         // ...and never faster than it left the ground, so swinging a fall sideways can't build speed
         const cs = Math.min(sp, session.bird.bouncing.v0 || sp);
         bvx = Math.cos(na) * cs; bvy = Math.sin(na) * cs;
@@ -273,7 +277,7 @@ export function createFlight({ session, viewport, systems }) {
         session.cam.shake = 0;
         if (!session.progress.swum) {
           session.progress.swum = true; systems.progression.saveProgress();
-          session.state.toast = { text: 'New upgrade unlocked in the Roost: Swimming', t: 4 };
+          systems.combat.toast('New upgrade unlocked in the Roost: Swimming', 4);
         }
       }
       session.bird.x = clamp(session.bird.x, lake.x0 + 0.5, lake.x0 + lake.w - 0.5);

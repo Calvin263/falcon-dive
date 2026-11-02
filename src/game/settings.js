@@ -1,8 +1,14 @@
 import { SETTINGS_KEY, DEFAULT_ANIMAL_SIZES, SPECIES } from '../config.js';
 import { clamp } from '../core/math.js';
 
+const GRAPHICS_PRESETS = [
+  { id: 'low', label: 'Low 50%', scale: 0.5 },
+  { id: 'medium', label: 'Medium 75%', scale: 0.75 },
+  { id: 'high', label: 'High 100%', scale: 1 },
+];
+
 export function createSettings({ session, viewport, systems, storage }) {
-  session.settings = { animalSizes: { ...DEFAULT_ANIMAL_SIZES }, previewKind: 'rabbit' };
+  session.settings = { animalSizes: { ...DEFAULT_ANIMAL_SIZES }, previewKind: 'rabbit', graphicsPreset: 'medium' };
   function loadSettings() {
     session.settings.animalSizes = { ...DEFAULT_ANIMAL_SIZES };
     try {
@@ -10,6 +16,11 @@ export function createSettings({ session, viewport, systems, storage }) {
       if (!next) {
         saveSettings();
         return;
+      }
+      const graphicsPreset = GRAPHICS_PRESETS.find(option => option.id === next.graphicsPreset);
+      if (graphicsPreset) {
+        session.settings.graphicsPreset = graphicsPreset.id;
+        viewport.setResolutionScale(graphicsPreset.scale);
       }
       const saved = next.animalSizes && typeof next.animalSizes === 'object' ? next.animalSizes :
                     (next.animalScales && typeof next.animalScales === 'object' ? next.animalScales : null);
@@ -31,7 +42,31 @@ export function createSettings({ session, viewport, systems, storage }) {
     }
   }
   function saveSettings() {
-    storage.write(SETTINGS_KEY, { animalSizes: session.settings.animalSizes });
+    storage.write(SETTINGS_KEY, { animalSizes: session.settings.animalSizes, graphicsPreset: session.settings.graphicsPreset });
+  }
+  function graphicsOptions() {
+    const width = 86, height = 32, gap = 10, total = GRAPHICS_PRESETS.length * width + (GRAPHICS_PRESETS.length - 1) * gap;
+    const x0 = (viewport.W - total) / 2, y = viewport.H / 2 + 72;
+    return GRAPHICS_PRESETS.map((option, index) => ({
+      ...option,
+      x: x0 + index * (width + gap),
+      y,
+      width,
+      height,
+      selected: option.id === session.settings.graphicsPreset,
+    }));
+  }
+  function graphicsPresetAt(x, y) {
+    return graphicsOptions().find(option => x >= option.x && x <= option.x + option.width &&
+      y >= option.y && y <= option.y + option.height)?.id ?? null;
+  }
+  function setGraphicsPreset(id) {
+    const option = GRAPHICS_PRESETS.find(candidate => candidate.id === id);
+    if (!option) return false;
+    session.settings.graphicsPreset = option.id;
+    viewport.setResolutionScale(option.scale);
+    saveSettings();
+    return true;
   }
   function setAnimalScale(kind, value) {
     if (!DEFAULT_ANIMAL_SIZES[kind]) return;
@@ -74,9 +109,9 @@ export function createSettings({ session, viewport, systems, storage }) {
         const ta = document.createElement('textarea');
         ta.value = text; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove();
       }
-      session.state.toast = { text: 'Copied sizes', t: 1.8 };
+      systems.combat.toast('Copied sizes', 1.8);
     } catch {
-      session.state.toast = { text: 'Copy blocked', t: 1.8 };
+      systems.combat.toast('Copy blocked', 1.8);
     }
   }
   function pauseCopyButtonHit(x, y) {
@@ -92,5 +127,5 @@ export function createSettings({ session, viewport, systems, storage }) {
     const copyW = previewW - 20;
     return x >= copyX && x <= copyX + copyW && y >= copyY && y <= copyY + 26;
   }
-  return { animalScaleFor, loadSettings, setAnimalScaleFromClientX };
+  return { animalScaleFor, graphicsOptions, graphicsPresetAt, loadSettings, setAnimalScaleFromClientX, setGraphicsPreset };
 }

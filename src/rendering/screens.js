@@ -1,5 +1,5 @@
 import { HAZARD_NAME, ACHIEVEMENTS, SPECIES } from '../config.js';
-import { clamp } from '../core/math.js';
+import { drawWrappedText } from './text.js';
 
 export function createScreens({ session, viewport, systems }) {
   // ---------- Recap & Roost screens ----------
@@ -111,82 +111,67 @@ export function createScreens({ session, viewport, systems }) {
   }
 
   function drawShop() {
-    viewport.ctx.fillStyle = 'rgba(4,8,16,0.82)';
+    viewport.ctx.fillStyle = '#080f1c';
     viewport.ctx.fillRect(0, 0, viewport.W, viewport.H);
-    viewport.ctx.textAlign = 'center'; viewport.ctx.fillStyle = '#ffd34d'; viewport.ctx.font = 'bold 32px sans-serif';
-    viewport.ctx.fillText('The Roost', viewport.W / 2, 46);
+    viewport.ctx.textAlign = 'left'; viewport.ctx.fillStyle = '#ffd34d'; viewport.ctx.font = 'bold 28px sans-serif';
+    viewport.ctx.fillText('The Roost', 16, 36);
+    viewport.ctx.textAlign = 'center';
     viewport.ctx.fillStyle = '#cfe6f7'; viewport.ctx.font = '14px sans-serif';
-    viewport.ctx.fillText(`Spend your earnings, then head out for day ${session.progress.day}`, viewport.W / 2, 70);
+    viewport.ctx.fillText(`Choose an upgrade · Next hunt: day ${session.progress.day}`, viewport.W / 2, 70);
     viewport.ctx.fillStyle = session.progress.moon ? '#ffd34d' : '#8fa3b8'; viewport.ctx.font = session.progress.moon ? 'bold 12px sans-serif' : '12px sans-serif';
     viewport.ctx.fillText(session.progress.moon ? `🌕 You reached the moon on day ${session.progress.moon}` : '🌕 Goal: bounce high enough to reach the moon', viewport.W / 2, 88);
     viewport.ctx.textAlign = 'right'; viewport.ctx.fillStyle = '#ffd34d'; viewport.ctx.font = 'bold 26px monospace';
-    viewport.ctx.fillText(`$${session.progress.money}`, viewport.W - 24, 46);
+    viewport.ctx.fillText(`$${session.progress.money}`, viewport.W - 24, 32);
     viewport.ctx.fillStyle = '#aab'; viewport.ctx.font = '12px sans-serif';
-    viewport.ctx.fillText('wallet', viewport.W - 24, 64);
+    viewport.ctx.fillText('wallet', viewport.W - 24, 48);
 
     const list = systems.progression.shopUpgrades();
     const narrow = viewport.W < 520;
-    const cols = viewport.W >= 1080 ? 3 : viewport.W >= 720 ? 2 : 1, gap = 10;
-    const cw = Math.min(340, (viewport.W - (narrow ? 32 : 40) - (cols - 1) * gap) / cols);
-    const rowsN = Math.ceil(list.length / cols), ch = narrow ? 92 : 88, rowStep = ch + gap;
+    const { cols, rows: rowsN, top: gy, tileHeight: ch, gap, detailHeight } = shopMetrics();
+    const cw = Math.min(280, (viewport.W - 32 - (cols - 1) * gap) / cols);
+    const rowStep = ch + gap;
     const gx = (viewport.W - (cols * cw + (cols - 1) * gap)) / 2;
-    const gy = narrow ? 104 : 100;
-    const footerHeight = narrow ? 112 : 80;
-    const listBottom = viewport.H - footerHeight;
-    const listHeight = Math.max(0, listBottom - gy);
-    const contentHeight = rowsN * rowStep - gap;
-    const maxScroll = Math.max(0, contentHeight - listHeight);
-    session.shopScroll = clamp(session.shopScroll || 0, 0, maxScroll);
-    const offset = session.shopScroll;
-
-    viewport.ctx.save();
-    viewport.ctx.beginPath();
-    viewport.ctx.rect(0, gy, viewport.W, listHeight);
-    viewport.ctx.clip();
+    session.shopScroll = 0;
+    const selected = list.find(u => u.id === session.shopSelection) || list[0];
+    session.shopSelection = selected.id;
     list.forEach((u, i) => {
-      const x = gx + (i % cols) * (cw + gap), y = gy + Math.floor(i / cols) * rowStep - offset;
-      if (y < gy || y + ch > listBottom) return;
+      const x = gx + (i % cols) * (cw + gap), y = gy + Math.floor(i / cols) * rowStep;
       const t = systems.progression.tier(u.id), costs = systems.progression.upgradeCosts(u), maxed = t >= costs.length, capped = !maxed && t >= systems.progression.upgradeCap(u);
-      viewport.ctx.fillStyle = 'rgba(20,32,50,0.95)'; viewport.ctx.fillRect(x, y, cw, ch);
-      viewport.ctx.strokeStyle = maxed ? 'rgba(127,214,127,0.6)' : 'rgba(255,255,255,0.2)'; viewport.ctx.lineWidth = 1;
+      session.uiButtons.push({ x, y, w: cw, h: ch, label: u.name, id: u.id, enabled: true, onClick: () => { session.shopSelection = u.id; } });
+      viewport.ctx.fillStyle = selected === u ? '#2c4b69' : 'rgba(20,32,50,0.95)'; viewport.ctx.fillRect(x, y, cw, ch);
+      viewport.ctx.strokeStyle = selected === u ? '#ffd34d' : maxed ? '#7fd67f' : 'rgba(255,255,255,0.2)'; viewport.ctx.lineWidth = 1;
       viewport.ctx.strokeRect(x + 0.5, y + 0.5, cw - 1, ch - 1);
-      viewport.ctx.textAlign = 'left'; viewport.ctx.fillStyle = '#fff'; viewport.ctx.font = 'bold 15px sans-serif';
-      viewport.ctx.fillText(u.name, x + 12, y + 21);
-      // Tier pips
-      for (let k = 0; k < costs.length; k++) {
-        viewport.ctx.fillStyle = k < t ? '#ffd34d' : 'rgba(255,255,255,0.18)';
-        viewport.ctx.beginPath(); viewport.ctx.arc(x + cw - 16 - (costs.length - 1 - k) * 14, y + 16, 5, 0, Math.PI * 2); viewport.ctx.fill();
-      }
-      viewport.ctx.fillStyle = '#9aa7b8'; viewport.ctx.font = '11px sans-serif';
-      viewport.ctx.fillText(u.desc, x + 12, y + 40, cw - 24);
-      const textW = Math.max(80, cw - 112);
-      viewport.ctx.fillStyle = '#e8eef5'; viewport.ctx.font = '12px sans-serif';
-      viewport.ctx.fillText(`Now: ${u.stat(t)}`, x + 12, y + 58, textW);
-      if (!maxed && !capped) {
-        viewport.ctx.fillStyle = capped ? '#9aa7b8' : '#7fd67f';
-        viewport.ctx.fillText(`Next: ${u.stat(t + 1)}`, x + 12, y + 76, textW);
-      }
-      const cost = maxed ? 0 : costs[t];
-      drawButton(x + cw - 92, y + 51, 80, 28, maxed ? 'MAXED' : capped ? 'LOCKED' : `$${cost}`, () => systems.progression.buyUpgrade(u.id),
-             { enabled: !maxed && !capped && session.progress.money >= cost, primary: !maxed && !capped, font: 'bold 14px monospace', id: u.id });
-      if (capped) {
-        viewport.ctx.fillStyle = '#ffb36b'; viewport.ctx.font = '10px sans-serif'; viewport.ctx.textAlign = 'right';
-        viewport.ctx.fillText(u.capHint, x + cw - 12, y + 76, Math.max(0, cw - 112));
-      }
+      viewport.ctx.textAlign = 'left'; viewport.ctx.fillStyle = '#fff'; viewport.ctx.font = 'bold 13px sans-serif';
+      drawWrappedText(viewport.ctx, u.name, x + 8, y + 17, cw - 16, 14);
+      viewport.ctx.font = '11px sans-serif'; viewport.ctx.fillStyle = '#cfe6f7';
+      viewport.ctx.fillText(`${t}/${costs.length}`, x + 8, y + ch - 9);
+      viewport.ctx.textAlign = 'right';
+      viewport.ctx.fillStyle = maxed ? '#7fd67f' : capped || session.progress.money < costs[t] ? '#9aa7b8' : '#ffd34d';
+      viewport.ctx.fillText(maxed ? 'MAX' : capped ? 'LOCKED' : `$${costs[t]}`, x + cw - 8, y + ch - 9);
     });
-    viewport.ctx.restore();
+    const detailY = gy + rowsN * rowStep;
+    const gridWidth = cols * cw + (cols - 1) * gap;
+    drawPanel(gx, detailY, gridWidth, detailHeight);
+    const t = systems.progression.tier(selected.id), costs = systems.progression.upgradeCosts(selected);
+    const maxed = t >= costs.length, capped = !maxed && t >= systems.progression.upgradeCap(selected);
+    viewport.ctx.textAlign = 'left'; viewport.ctx.fillStyle = '#fff'; viewport.ctx.font = 'bold 15px sans-serif';
+    viewport.ctx.fillText(selected.name, gx + 12, detailY + 22);
+    viewport.ctx.font = '12px sans-serif'; viewport.ctx.fillStyle = '#cfe6f7';
+    let textY = drawWrappedText(viewport.ctx, selected.desc, gx + 12, detailY + 42, gridWidth - 24, 16);
+    textY = drawWrappedText(viewport.ctx, `Now: ${selected.stat(t)}`, gx + 12, textY + 4, gridWidth - 24, 16);
+    viewport.ctx.fillStyle = capped ? '#ffb36b' : '#7fd67f';
+    if (!maxed) drawWrappedText(viewport.ctx, capped ? selected.capHint : `Next: ${selected.stat(t + 1)}`, gx + 12, textY + 4, gridWidth - 24, 16);
+    drawButton(gx + gridWidth - 132, detailY + detailHeight - 40, 120, 32, maxed ? 'MAXED' : capped ? 'LOCKED' : `Buy $${costs[t]}`,
+      () => systems.progression.buyUpgrade(selected.id),
+      { enabled: !maxed && !capped && session.progress.money >= costs[t], primary: true, id: 'buyUpgrade' });
 
     const got = ACHIEVEMENTS.filter(a => session.progress.ach[a.id]).length;
     if (narrow) {
       drawButton(16, viewport.H - 102, viewport.W - 32, 40, `Start day ${session.progress.day} →`, systems.session.startDay, { primary: true, font: 'bold 17px sans-serif', id: 'startDay' });
       const utilityY = viewport.H - 50, utilityWidth = (viewport.W - 48) / 2;
-      drawButton(16, utilityY, utilityWidth, 32, 'Reset progress',
+      drawButton(16, utilityY, utilityWidth, 32, session.confirmReset ? 'Click again to wipe' : 'Reset progress',
                  () => { if (session.confirmReset) systems.session.resetProgress(); else session.confirmReset = true; }, { font: '12px sans-serif' });
       drawButton(32 + utilityWidth, utilityY, utilityWidth, 32, `Achievements ${got}/${ACHIEVEMENTS.length}`, () => { session.achView = true; }, { font: 'bold 12px sans-serif' });
-      if (maxScroll > 0) {
-        viewport.ctx.fillStyle = '#cfe6f7'; viewport.ctx.font = '11px sans-serif'; viewport.ctx.textAlign = 'center';
-        viewport.ctx.fillText(`${Math.floor(offset / rowStep) + 1}–${Math.min(rowsN, Math.ceil((offset + listHeight) / rowStep))} of ${rowsN}  ·  scroll to browse`, viewport.W / 2, listBottom - 5);
-      }
     } else {
       drawButton(viewport.W / 2 - 120, viewport.H - 62, 240, 42, `Start day ${session.progress.day} →`, systems.session.startDay, { primary: true, font: 'bold 17px sans-serif', id: 'startDay' });
       drawButton(16, viewport.H - 50, 150, 30, session.confirmReset ? 'Click again to wipe' : 'Reset progress',
@@ -200,23 +185,15 @@ export function createScreens({ session, viewport, systems }) {
     if (session.achView) drawAchievements();
   }
 
-  function scrollShop(delta) {
-    if (session.screen !== 'shop' || session.achView) return;
-    const list = systems.progression.shopUpgrades();
-    const cols = viewport.W >= 1080 ? 3 : viewport.W >= 720 ? 2 : 1;
-    const rows = Math.ceil(list.length / cols), rowStep = (viewport.W < 520 ? 92 : 88) + 10;
-    const top = viewport.W < 520 ? 104 : 100;
-    const footer = viewport.W < 520 ? 112 : 80;
-    const maxScroll = Math.max(0, rows * rowStep - 10 - (viewport.H - footer - top));
-    session.shopScroll = clamp((session.shopScroll || 0) + delta, 0, maxScroll);
-  }
   function shopMetrics() {
     const narrow = viewport.W < 520;
-    const cols = viewport.W >= 1080 ? 3 : viewport.W >= 720 ? 2 : 1;
+    const cols = viewport.W >= 1080 ? 4 : viewport.W >= 520 || viewport.H < 740 ? 3 : 2;
     const rows = Math.ceil(systems.progression.shopUpgrades().length / cols);
-    const top = narrow ? 104 : 100, bottom = viewport.H - (narrow ? 112 : 80);
-    const contentHeight = rows * ((narrow ? 92 : 88) + 10) - 10;
-    return { top, bottom, rows, contentHeight, scroll: session.shopScroll || 0, maxScroll: Math.max(0, contentHeight - (bottom - top)) };
+    const top = 100, bottom = viewport.H - (narrow ? 112 : 80), gap = 6;
+    const detailHeight = narrow ? 208 : 172;
+    const tileHeight = Math.min(68, Math.floor((bottom - top - detailHeight - 8) / rows) - gap);
+    const contentHeight = rows * (tileHeight + gap) + detailHeight;
+    return { top, bottom, rows, cols, tileHeight, gap, detailHeight, contentHeight, scroll: 0, maxScroll: 0 };
   }
 
   // Achievement list over the Roost: earned ones in gold with the day, the rest dimmed
@@ -255,5 +232,5 @@ export function createScreens({ session, viewport, systems }) {
     });
     drawButton(viewport.W / 2 - 70, y0 + ph - 44, 140, 32, 'Back', () => { session.achView = false; }, { primary: true });
   }
-  return { drawRecap, drawShop, scrollShop, shopMetrics };
+  return { drawRecap, drawShop, shopMetrics };
 }

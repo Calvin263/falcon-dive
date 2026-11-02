@@ -395,10 +395,7 @@ export function createPrey({ session, viewport, systems }) {
     session.state.catches++;
     session.state.catchLog.push(e);
     session.state.lastCatch = e;
-    session.state.msg = `${msg} +$${e.pts}`;
-    session.state.msgTags = priced.tags.join('  ·  ');
-    session.state.msgTagsFor = session.state.msg;
-    session.state.msgT = 2;
+    e.label = msg;
     systems.combat.catchAchievements(e, priced.tags);
     return e;
   }
@@ -410,8 +407,6 @@ export function createPrey({ session, viewport, systems }) {
     e.count++; e.pts += extra; e.t = session.state.time;
     session.state.score += extra;
     session.state.chainT = session.state.time;
-    session.state.msg = `Starlings ×${e.count}! +$${e.pts}`;
-    session.state.msgT = 2;
   }
 
   function checkCatch(p, dt) {
@@ -610,7 +605,6 @@ export function createPrey({ session, viewport, systems }) {
     // Marked stolen so a buzzard can't steal it back
     award({ kind: 'turtle', speed: impact, turtleHit: true, targetKind: kind, stolen: true },
           systems.session.priceCatch(kind, { impact, unseen }), `TURTLE STRIKE! ${HAZARD_NAME[kind]}`);
-    session.state.msgT = 2.5;
     removeHazard(kind, obj);
     f.struck = true;
     f.hitBuzzard = true;
@@ -624,7 +618,7 @@ export function createPrey({ session, viewport, systems }) {
     if (kind === 'hawk') { hz.hawk = null; hz.hawkT = Math.max(hz.hawkT, 45); }
     if (kind === 'hunter') {
       session.state.guns.push({ x: obj.x, alt: 1.5, vx: (Math.random() - 0.5) * 8, vy: GUN_THROW_VY, ammo: systems.combat.gunStat('ammo') });
-      session.state.msg += '  ·  His rifle went flying — catch it!';
+      if (!session.progress.gunFound) systems.combat.toast('Hunter down — catch the dropped rifle!', 3);
     }
     for (let i = 0; i < 20; i++) session.particles.push({
       x: obj.x, alt: Math.max(0.5, obj.alt || 1), vx: (Math.random() - 0.5) * 18, vy: Math.random() * 12, life: 1.1

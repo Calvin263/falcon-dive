@@ -504,7 +504,8 @@ export function createRenderer({ session, viewport, systems }) {
       }
     }
     viewport.ctx.filter = OUTLINE;
-    for (const f of session.state.fallers) systems.sprites.drawTurtle(systems.flight.toScreenX(f.x), systems.flight.toScreenY(f.alt), { vx: f.vx }, SPECIES.turtle.scale, f.spin);
+    const turtleScale = SPECIES.turtle.scale * systems.progression.spriteK();
+    for (const f of session.state.fallers) systems.sprites.drawTurtle(systems.flight.toScreenX(f.x), systems.flight.toScreenY(f.alt), { vx: f.vx }, turtleScale, f.spin);
     viewport.ctx.filter = 'none';
   }
   function drawDustDevils() {

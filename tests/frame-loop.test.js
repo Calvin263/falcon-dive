@@ -7,9 +7,11 @@ function harness(options = {}) {
   let updates = 0;
   let renders = 0;
   const deltas = [];
+  const frameSamples = [];
   const loop = createFrameLoop({
     update: dt => { updates++; deltas.push(dt); },
     render: () => renders++,
+    onFrame: (now, elapsed) => frameSamples.push({ now, elapsed }),
     requestFrame: next => { callback = next; return 1; },
     cancelFrame: () => { callback = null; },
     ...options,
@@ -21,6 +23,7 @@ function harness(options = {}) {
     get renders() { return renders; },
     get pending() { return !!callback; },
     deltas,
+    frameSamples,
   };
 }
 
@@ -55,5 +58,31 @@ test('resume resets timing and stop cancels scheduled work', () => {
   game.tick(100000);
   assert.ok(game.deltas.every(dt => dt <= 1 / 30));
   assert.equal(game.updates, 2);
+  game.loop.stop();
+});
+
+test('reports browser frame gaps independently of the capped render rate', () => {
+  const game = harness();
+  game.loop.start();
+  for (const now of [0, 7, 14, 21, 28]) game.tick(now);
+  assert.deepEqual(game.frameSamples.map(sample => sample.elapsed), [0, 7, 7, 7, 7]);
+  assert.ok(game.renders < game.frameSamples.length);
+  game.loop.stop();
+});
+
+test('resuming an idle loop resets its timing baseline without losing stall samples', () => {
+  let paused = false;
+  const game = harness({ isPaused: () => paused });
+  game.loop.start();
+  game.tick(0);
+  game.tick(17);
+  paused = true;
+  game.tick(34);
+  assert.equal(game.pending, false);
+  paused = false;
+  game.loop.invalidate();
+  game.tick(10000);
+  assert.equal(game.frameSamples.at(-1).elapsed, 0);
+  assert.equal(game.frameSamples[1].elapsed, 17);
   game.loop.stop();
 });

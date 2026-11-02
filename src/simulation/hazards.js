@@ -92,6 +92,7 @@ export function createHazards({ session, viewport, systems }) {
   }
 
   function updateCat(c, dt) {
+    const previousX = c.x, previousAlt = c.alt;
     c.t -= dt; c.alertT -= dt;
     const dx = session.bird.x - c.x, hawk = session.state.hazards.hawk;
     // A goshawk swooping low is fair game too: the cat goes for whichever is closer
@@ -130,6 +131,36 @@ export function createHazards({ session, viewport, systems }) {
     } else if (c.mode === 'sit' && c.t <= 0) {
       c.mode = 'hide'; c.t = 1;
     }
+    c.prevX = previousX;
+    c.prevAlt = previousAlt;
+  }
+
+  function recordHunterLineCrossing(h, who, obj, fromX, fromAlt, toX, toAlt, radius) {
+    const dx = h.ax - h.x, dy = h.aalt - 1.6, length = Math.hypot(dx, dy) || 1;
+    const ux = dx / length, uy = dy / length;
+    const perpendicular = (x, alt) => (x - h.x) * uy - (alt - 1.6) * ux;
+    const fromPerpendicular = perpendicular(fromX, fromAlt);
+    const toPerpendicular = perpendicular(toX, toAlt);
+    const t = fromPerpendicular === toPerpendicular ? 0 : clamp(-fromPerpendicular / (toPerpendicular - fromPerpendicular), 0, 1);
+    const x = fromX + (toX - fromX) * t, alt = fromAlt + (toAlt - fromAlt) * t;
+    const crossTrack = Math.abs(perpendicular(x, alt));
+    const along = (x - h.x) * ux + (alt - 1.6) * uy;
+    if (along <= 0 || crossTrack > radius) return;
+    if (!h.crossfireHit || along < h.crossfireHit.d) h.crossfireHit = { who, obj, d: along };
+  }
+
+  function trackHunterLineCrossings(h) {
+    const hz = session.state.hazards;
+    for (const cat of hz.cats) {
+      if (cat.gone || cat.mode === 'hide') continue;
+      recordHunterLineCrossing(h, 'cat', cat, cat.prevX ?? cat.x, (cat.prevAlt ?? cat.alt) + 0.4,
+        cat.x, cat.alt + 0.4, 1.6);
+    }
+    const hawk = hz.hawk;
+    if (hawk && !hawk.gone) {
+      recordHunterLineCrossing(h, 'hawk', hawk, hawk.prevX ?? hawk.x, hawk.prevAlt ?? hawk.alt,
+        hawk.x, hawk.alt, HAWK_HIT + 1);
+    }
   }
 
   // The hunter's aim trails the bird; fly slowly in range and the lock builds. Then it shoulders the rifle,
@@ -137,6 +168,7 @@ export function createHazards({ session, viewport, systems }) {
   function updateHunter(h, dt) {
     h.reload -= dt; h.flash -= dt; h.tracer -= dt;
     if (h.aim) {
+      trackHunterLineCrossings(h);
       h.aim -= dt;
       if (h.aim <= 0) fireHunter(h);
       return;
@@ -166,12 +198,15 @@ export function createHazards({ session, viewport, systems }) {
       const snap = h.lock < 1, lead = HUNTER_AIM_T * (snap ? HUNTER_SNAP_LEAD + 0.15 * danger() : 1);
       const spread = snap ? HUNTER_SNAP_SPREAD : 0;
       h.lock = 0; h.watch = 0; h.aim = HUNTER_AIM_T;
+      h.crossfireHit = null;
       h.ax = session.bird.x + session.bird.vx * lead + (Math.random() - 0.5) * 2 * spread;
       h.aalt = Math.max(0.5, session.bird.alt + session.bird.vy * lead + (Math.random() - 0.5) * 2 * spread);
     }
   }
 
   function fireHunter(h) {
+    const trackedHit = h.crossfireHit;
+    h.crossfireHit = null;
     h.aim = 0; h.reload = HUNTER_RELOAD; h.flash = 0.15; h.tracer = 0.3;
     session.state.rings.push({ x: h.x, alt: 1.6, t: 0, r: 60, kind: 'shot' });
     // Gunfire sends nearby prey running
@@ -189,6 +224,8 @@ export function createHazards({ session, viewport, systems }) {
     if (!systems.world.insideCloud(session.bird.x, session.bird.alt) && !session.bird.inWater) hits.push({ who: 'bird', d: onLine(session.bird.x, session.bird.alt, HUNTER_HIT) });
     if (hz.hawk && !hz.hawk.gone) hits.push({ who: 'hawk', obj: hz.hawk, d: onLine(hz.hawk.x, hz.hawk.alt, HAWK_HIT + 1) });
     for (const c of hz.cats) if (!c.gone && c.mode !== 'hide') hits.push({ who: 'cat', obj: c, d: onLine(c.x, c.alt + 0.4, 1.6) });
+    if (trackedHit && !trackedHit.obj.gone &&
+      (trackedHit.who === 'hawk' ? hz.hawk === trackedHit.obj : hz.cats.includes(trackedHit.obj))) hits.push(trackedHit);
     const first = hits.filter(o => o.d < Infinity).sort((a, b) => a.d - b.d)[0];
     if (!first) { session.state.msg = 'A shot whizzed past!'; session.state.msgT = 2; h.tracerLen = 0; return; }
     h.tracerLen = first.d;
@@ -217,10 +254,13 @@ export function createHazards({ session, viewport, systems }) {
     const side = randDir(), hz = session.state.hazards;
     hz.hawk = { x: session.bird.x - side * 220, alt: Math.min(session.MAX_ALT, session.bird.alt + 90), vx: side * 25, vy: 0,
                 mode: 'stalk', t: 4 + Math.random() * 2, attacks: 0, flapT: 0, alertT: 0, minD: Infinity };
+    hz.hawk.prevX = hz.hawk.x;
+    hz.hawk.prevAlt = hz.hawk.alt;
     session.state.msg = 'A goshawk is hunting you!'; session.state.msgT = 2.5;
   }
 
   function updateHawk(h, dt) {
+    const previousX = h.x, previousAlt = h.alt;
     h.t -= dt; h.flapT += dt * 7; h.alertT -= dt;
     const dx = session.bird.x - h.x, dy = session.bird.alt - h.alt, d = Math.hypot(dx, dy);
     const steer = (tx, ty, speed, rate) => {
@@ -288,6 +328,8 @@ export function createHazards({ session, viewport, systems }) {
       if (d > 700) session.state.hazards.hawk = null;
     }
     h.x += h.vx * dt; h.alt = Math.max(3, h.alt + h.vy * dt);
+    h.prevX = previousX;
+    h.prevAlt = previousAlt;
   }
 
   function updateHazards(dt) {
@@ -301,5 +343,5 @@ export function createHazards({ session, viewport, systems }) {
     }
     if (hz.hawk) updateHawk(hz.hawk, dt);
   }
-  return { danger, killBird, newHazards, updateHazards, updateRivals };
+  return { danger, killBird, newHazards, updateHazards, updateHunter, updateRivals };
 }

@@ -1,4 +1,4 @@
-import { G, SHELL_CRACK_SPEED, TURTLE_HOMING, STARLING_COMBO_TIME, CHAIN_MAX, HAZARD_BOUNTY, HAZARD_NAME, ACHIEVEMENTS, STATS, RICOCHET_RANGE, GUN_STATS, SAT_R, SPECIES, GUN_GRAB_R, GUN_GRAB_ALT, GUN_AIR_GRAB, GUN_TERMINAL, GUN_REGRAB_SEP, AUTO_FIRE_DT, ROCKET_SPEED, ROCKET_BLAST, ROCKET_FUSE, ROCKET_TURN, ROCKET_LOCK_CONE, ROCKET_SEEK, ROCKET_SEEK_CONE, UNDERWATER_RANGE, TORPEDO_SPEED, GROTTO_L, GROTTO_H } from '../config.js';
+import { G, SHELL_CRACK_SPEED, TURTLE_HOMING, STARLING_COMBO_TIME, CHAIN_MAX, HAZARD_BOUNTY, HAZARD_NAME, ACHIEVEMENTS, STATS, RICOCHET_RANGE, GUN_STATS, GUN_HUNTER_HIT_RADIUS, SAT_R, SPECIES, GUN_GRAB_R, GUN_GRAB_ALT, GUN_AIR_GRAB, GUN_TERMINAL, GUN_REGRAB_SEP, AUTO_FIRE_DT, ROCKET_SPEED, ROCKET_BLAST, ROCKET_FUSE, ROCKET_TURN, ROCKET_LOCK_CONE, ROCKET_SEEK, ROCKET_SEEK_CONE, UNDERWATER_RANGE, TORPEDO_SPEED, GROTTO_L, GROTTO_H } from '../config.js';
 import { clamp, randDir, wrapAngle } from '../core/math.js';
 
 export function createCombat({ session, viewport, systems }) {
@@ -32,7 +32,7 @@ export function createCombat({ session, viewport, systems }) {
     for (const r of session.state.rivals) if (!r.gone) out.push([r.x, r.alt, w + 1, { type: 'buzzard', r }]);
     const hz = session.state.hazards;
     for (const c of hz.cats) if (!c.gone) out.push([c.x, c.alt + 0.4, w, { type: 'hz', kind: 'cat', obj: c }]);
-    for (const h of hz.hunters) if (!h.gone) out.push([h.x, 1, w, { type: 'hz', kind: 'hunter', obj: h }]);
+    for (const h of hz.hunters) if (!h.gone) out.push([h.x, 1, Math.max(w, GUN_HUNTER_HIT_RADIUS), { type: 'hz', kind: 'hunter', obj: h }]);
     if (hz.hawk) out.push([hz.hawk.x, hz.hawk.alt, w + 1, { type: 'hz', kind: 'hawk', obj: hz.hawk }]);
     // Turtles in flight: skeet
     for (const f of session.state.fallers) if (!f.done && f.alt > 0.5) out.push([f.x, f.alt, w, { type: 'skeet', f }]);
@@ -141,15 +141,13 @@ export function createCombat({ session, viewport, systems }) {
         takeShot(hit, 'BANG!');
         const hx = session.bird.x + ux * t, ha = Math.max(0.5, session.bird.alt + uy * t);
         for (let i = 0; i < 16; i++) session.particles.push({ x: hx, alt: ha, vx: (Math.random() - 0.5) * 16, vy: Math.random() * 10, life: 1 });
-      } else if (!gunAuto()) {
-        session.state.msg = 'BANG! Missed'; session.state.msgT = 1.5; session.state.msgTags = null;
       }
       gunSpook(session.bird.x, gunStat('spook'));
     }
     if (g.ammo <= 0) {
       session.bird.carrying = null;
       session.mouse.aiming = false; session.mouse.throwHeld = false; session.mouse.steer = null;
-      session.state.toast = { text: gunBazooka() ? 'Last rocket away — launcher dropped' : 'Out of ammo — gun dropped', t: 2.5 };
+      toast(gunBazooka() ? 'Last rocket away — launcher dropped' : 'Out of ammo — gun dropped', 2.5);
     }
   }
 
@@ -159,15 +157,10 @@ export function createCombat({ session, viewport, systems }) {
     session.state.blasts.push({ x: bx, alt: ba, t: 0 });
     session.state.rings.push({ x: bx, alt: ba, t: 0, r: 120, kind: 'shot' });
     session.cam.shake = Math.max(session.cam.shake, 8);
-    let n = 0, total = 0;
     for (const [x, alt, rad, hit] of gunTargets()) {
       if (Math.hypot(x - bx, alt - ba) > ROCKET_BLAST + rad) continue;
-      const before = session.state.score;
       takeShot(hit, 'BOOM!');
-      n++; total += session.state.score - before;
     }
-    if (n > 1) { session.state.msg = `BOOM! ${n} at once +$${total}`; session.state.msgTags = null; session.state.msgT = 2.5; }
-    else if (!n) { session.state.msg = 'BOOM! Missed'; session.state.msgTags = null; session.state.msgT = 1.5; }
     for (let i = 0; i < 40; i++) session.particles.push({
       x: bx, alt: ba + 1, vx: (Math.random() - 0.5) * 40, vy: Math.random() * 26, life: 1.2
     });
@@ -253,7 +246,7 @@ export function createCombat({ session, viewport, systems }) {
         session.state.msg = `${inAir ? 'Caught it mid-air' : 'Got the ' + (gunBazooka() ? 'bazooka' : 'rifle')}! ${how}`; session.state.msgT = 3; session.state.msgTags = null;
         if (!session.progress.gunFound) {
           session.progress.gunFound = true; systems.progression.saveProgress();
-          session.state.toast = { text: 'New upgrade unlocked in the Roost: Rifle', t: 4 };
+          toast('New upgrade unlocked in the Roost: Rifle', 4);
         }
         break;
       }
@@ -276,7 +269,8 @@ export function createCombat({ session, viewport, systems }) {
   }
   // Toasts queue up so simultaneous achievements don't overwrite each other
   function toast(text, t = 3) {
-    if (session.state.toast && session.state.toast.t > 0.6) (session.state.toastQ = session.state.toastQ || []).push({ text, t });
+    if ((session.state.toast?.text === text && session.state.toast.t > 0) || session.state.toastQ.some(notice => notice.text === text)) return;
+    if (session.state.toast && session.state.toast.t > 0) session.state.toastQ.push({ text, t });
     else session.state.toast = { text, t };
   }
   function tickToast(dt) {
@@ -362,7 +356,7 @@ export function createCombat({ session, viewport, systems }) {
     f.struck = false; f.hitBuzzard = false; f.done = false;
     f.ricochets = (f.ricochets || 0) + 1;
     f.bounced = true;
-    session.state.msg += f.ricochets > 1 ? '  ·  DOUBLE RICOCHET!' : '  ·  Ricochet!';
+    if (session.state.lastCatch) session.state.lastCatch.tags.push(f.ricochets > 1 ? 'Double ricochet' : 'Ricochet');
   }
 
   function buzzardStrike(f, r) {
@@ -370,7 +364,6 @@ export function createCombat({ session, viewport, systems }) {
     // Marked stolen so a buzzard can't steal it back
     const e = systems.prey.award({ kind: 'turtle', speed: impact, turtleHit: true, buzzard: true, targetKind: 'buzzard', stolen: true },
                     systems.session.priceCatch('buzzard', { impact }), 'TURTLE STRIKE! Buzzard');
-    session.state.msgT = 2.5;
     r.gone = true;
     r.mode = 'leave'; r.t = 4; r.alertT = 0.8;
     f.struck = true;
@@ -462,5 +455,5 @@ export function createCombat({ session, viewport, systems }) {
     }
     session.state.fallers = session.state.fallers.filter(f => !f.done);
   }
-  return { achieve, catchAchievements, fireGun, gunAimHeld, gunAuto, gunBazooka, gunFreeAim, gunRay, gunStat, gunTargets, gunTrace, predictImpact, ricochet, takeShot, tickToast, updateFallers, updateGuns, updateRockets };
+  return { achieve, catchAchievements, fireGun, gunAimHeld, gunAuto, gunBazooka, gunFreeAim, gunRay, gunStat, gunTargets, gunTrace, predictImpact, ricochet, takeShot, tickToast, toast, updateFallers, updateGuns, updateRockets };
 }

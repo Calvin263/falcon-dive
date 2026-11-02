@@ -31,11 +31,20 @@ System factories receive `{ session, viewport, systems, storage }`. Cross-system
 - Player and prey poses are outlined once and cached. The sprite cache is bounded to 768 entries and approximately 32 MB of RGBA pixels; browser/GPU overhead is additional.
 - Deterministic terrain is cached by world seed with a 512-entry limit.
 - Grass work follows visible density, skips offscreen ground, and reuses visible lake bounds and wind calculations.
-- The main canvas is opaque and uses CSS-pixel dimensions rather than multiplying work by device pixel ratio.
+- The main canvas is opaque and renders to a 0.75-scale backing store while retaining full-size CSS and logical coordinates, reducing canvas pixel work by about 44%.
+- Pause settings offer Low (50%), Medium (75%), and High (100%) canvas resolution; the selection is saved with animal-size settings and applies immediately.
 
-`window.__falconDiveDebug.getMetrics()` reports draw/update counts, last CPU timings, and cache usage. These timings do not measure GPU execution. Verify actual GPU utilization on the target machine; no fixed utilization reduction is guaranteed.
+`window.__falconDiveDebug.getMetrics().canvas` reports the backing resolution and scale. `.diagnostics` reports a rolling 180-frame summary of animation gaps, render/update CPU time, current and peak visible prey, flock members, turtles, cats, hunters, particles, combat effects, and cache usage. `slowFrames` retains recent animation gaps over 22 ms with the matching CPU timings and scene counts. Large gaps with low render/update CPU time point outside JavaScript work (for example browser/compositor or GPU scheduling); the canvas API cannot measure GPU execution directly. Compare the diagnostics and Task Manager GPU load during a slowdown; no fixed utilization reduction is guaranteed.
 
 Existing `falconDive.progress` and `falconDive.settings` storage keys and legacy upgrade migrations are preserved.
+
+## Interface
+
+- The Roost shows a compact upgrade grid without scrolling. Select a tile to read its description, current/next stats, and unlock requirements; use Buy to purchase.
+- A right-side status panel beneath the catch log groups weapon ammo, eyas hunting status and remaining shots, lucky-feather saves, and bounces. The log limits visible cards to keep the panel on-screen; older catches remain available in the recap.
+- The speedometer is anchored bottom-left, with a horizontal focus meter below it. The meter turns red when locked and marks the recovery threshold.
+- Recent catches show their name, earnings, and applied modifiers in a compact, wrapping upper-screen panel for four seconds. Flock combos update the same panel; warnings and unlock banners remain separate. Full catch history stays in the catch log/recap. Eyas calls update the status badge.
+- Gameplay notices wrap near the top of the screen. Achievement and unlock banners queue without replacing an active banner; repeated queued notices are deduplicated.
 
 ## Verify
 

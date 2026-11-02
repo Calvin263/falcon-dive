@@ -32,6 +32,7 @@ export function createDebug({ session, viewport, systems }) {
     get session() { return session; },
     get buttons() { return session.uiButtons; },
     get shopMetrics() { return systems.screens.shopMetrics(); },
+    get graphicsOptions() { return systems.settings.graphicsOptions(); },
     priceCatch: systems.session.priceCatch, endDay: systems.session.endDay, showRecap: systems.session.showRecap, showShop: systems.session.showShop, startDay: systems.session.startDay, buyUpgrade: systems.progression.buyUpgrade, resetProgress: systems.session.resetProgress, saveProgress: systems.progression.saveProgress,
     setBird(x = session.bird.x, alt = session.bird.alt, speed = session.bird.speed) {
       session.bird.x = x; session.bird.alt = alt; session.bird.speed = speed; session.bird.vx = session.bird.vx ?? 0; session.bird.vy = session.bird.vy ?? 0;

@@ -7,8 +7,6 @@ export function createInput({ session, viewport, systems }) {
     x >= PAUSE_BTN.x && x <= PAUSE_BTN.x + PAUSE_BTN.w && y >= PAUSE_BTN.y && y <= PAUSE_BTN.y + PAUSE_BTN.h;
 
   session.paused = false;
-  let touchStartY = null;
-  let touchMoved = false;
   function togglePause() { session.paused = !session.paused; session.mouse.down = false; session.mouse.sliderDrag = false; session.mouse.sliderKind = null; session.mouse.aiming = false; session.mouse.throwHeld = false; session.mouse.talonTarget = null; }
   function bindInput(options = {}) {
     viewport.canvas.addEventListener('mousemove', e => {
@@ -21,7 +19,7 @@ export function createInput({ session, viewport, systems }) {
         systems.settings.setAnimalScaleFromClientX(session.mouse.sliderKind, e.clientX);
       }
       if (session.paused) {
-        viewport.canvas.style.cursor = inPauseBtn(e.clientX, e.clientY) ? 'pointer' : 'crosshair';
+        viewport.canvas.style.cursor = inPauseBtn(e.clientX, e.clientY) || systems.settings.graphicsPresetAt(e.clientX, e.clientY) ? 'pointer' : 'crosshair';
         return;
       }
       viewport.canvas.style.cursor = inPauseBtn(e.clientX, e.clientY) ? 'pointer' : 'crosshair';
@@ -35,6 +33,8 @@ export function createInput({ session, viewport, systems }) {
       if (session.state.over) { systems.session.showRecap(); return; }
       if (inPauseBtn(e.clientX, e.clientY)) { togglePause(); return; }
       if (session.paused) {
+        const preset = systems.settings.graphicsPresetAt(e.clientX, e.clientY);
+        if (preset) { systems.settings.setGraphicsPreset(preset); return; }
         session.paused = false;
         return;
       }
@@ -82,36 +82,6 @@ export function createInput({ session, viewport, systems }) {
       session.mouse.sliderKind = null;
     }, options);
     viewport.canvas.addEventListener('contextmenu', e => e.preventDefault(), options);
-    viewport.canvas.addEventListener('wheel', e => {
-      if (session.screen !== 'shop' || session.achView) return;
-      e.preventDefault();
-      systems.screens.scrollShop(e.deltaY);
-    }, { ...options, passive: false });
-    viewport.canvas.addEventListener('touchstart', e => {
-      if (session.screen !== 'shop' || session.achView || !e.touches.length) return;
-      touchStartY = e.touches[0].clientY;
-      touchMoved = false;
-    }, { ...options, passive: true });
-    viewport.canvas.addEventListener('touchmove', e => {
-      if (touchStartY === null || !e.touches.length) return;
-      const currentY = e.touches[0].clientY;
-      const delta = touchStartY - currentY;
-      if (Math.abs(delta) > 1) {
-        touchMoved ||= Math.abs(delta) > 3;
-        systems.screens.scrollShop(delta);
-        touchStartY = currentY;
-        e.preventDefault();
-      }
-    }, { ...options, passive: false });
-    viewport.canvas.addEventListener('touchend', e => {
-      if (touchMoved) e.preventDefault();
-      touchStartY = null;
-      touchMoved = false;
-    }, options);
-    viewport.canvas.addEventListener('touchcancel', () => {
-      touchStartY = null;
-      touchMoved = false;
-    }, options);
     addEventListener('keydown', e => {
       if (session.screen !== 'hunt') {
         if (e.key === 'Enter') { if (session.screen === 'recap') systems.session.showShop(); else systems.session.startDay(); }

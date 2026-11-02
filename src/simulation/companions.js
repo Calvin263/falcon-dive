@@ -128,8 +128,6 @@ export function createCompanions({ session, viewport, systems }) {
       else if (session.state.eyasHunt) e.t = Math.min(e.t, 0.2);
     }
     session.state.rings.push({ x: session.bird.x, alt: session.bird.alt, t: 0, r: 40, kind: 'screech' });
-    session.state.msg = session.state.eyasHunt ? 'KEE-KEE! Eyases, hunt!' : 'Eyases called back to formation';
-    session.state.msgT = 1.4; session.state.msgTags = null;
   }
 
   function updateFeathers(dt) {
