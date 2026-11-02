@@ -17,6 +17,8 @@ Desktop.ini
 node_modules/
 dist/
 build/
+test-results/
+playwright-report/
 
 # Logs
 *.log
