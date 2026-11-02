@@ -120,6 +120,8 @@ function getMetrics() {
     canvas: {
       width: viewport.canvas.width,
       height: viewport.canvas.height,
+      hudWidth: viewport.overlayCanvas.width,
+      hudHeight: viewport.overlayCanvas.height,
       logicalWidth: viewport.W,
       logicalHeight: viewport.H,
       resolutionScale: viewport.resolutionScale,

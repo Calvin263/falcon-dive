@@ -2,6 +2,40 @@ import { DIVE_SPEED, CRASH_REVEAL_DELAY, THROW_LOCK_AIR, SHADOW_VISIBLE_ALT, HIL
 import { clamp, wrapAngle, mixRGB, rgb, hash } from '../core/math.js';
 
 export function createRenderer({ session, viewport, systems }) {
+  const textCalls = [];
+  let textCallCount = 0;
+  const textStyles = ['font', 'textAlign', 'textBaseline', 'direction', 'fillStyle', 'strokeStyle', 'lineWidth', 'lineCap', 'lineJoin', 'miterLimit', 'globalAlpha', 'shadowColor', 'shadowBlur', 'shadowOffsetX', 'shadowOffsetY', 'filter'];
+
+  function recordText(ctx, method, args) {
+    let call = textCalls[textCallCount];
+    if (!call) call = textCalls[textCallCount] = { args: [], transform: {}, styles: {} };
+    textCallCount++;
+    call.method = method;
+    call.args.length = args.length;
+    for (let i = 0; i < args.length; i++) call.args[i] = args[i];
+    Object.assign(call.transform, ctx.getTransform());
+    for (const style of textStyles) call.styles[style] = ctx[style];
+  }
+
+  function drawTextOverlay() {
+    const { overlayCtx, canvas, W, H } = viewport;
+    overlayCtx.setTransform(1, 0, 0, 1, 0, 0);
+    overlayCtx.globalAlpha = 1;
+    overlayCtx.globalCompositeOperation = 'source-over';
+    overlayCtx.filter = 'none';
+    overlayCtx.clearRect(0, 0, W, H);
+    const scaleX = canvas.width / W, scaleY = canvas.height / H;
+    for (let i = 0; i < textCallCount; i++) {
+      const call = textCalls[i], matrix = call.transform;
+      overlayCtx.save();
+      overlayCtx.setTransform(matrix.a / scaleX, matrix.b / scaleX, matrix.c / scaleY,
+        matrix.d / scaleY, matrix.e / scaleX, matrix.f / scaleY);
+      for (const style of textStyles) overlayCtx[style] = call.styles[style];
+      overlayCtx[call.method](...call.args);
+      overlayCtx.restore();
+    }
+  }
+
   function roundedRectPath(x, y, w, h, r) {
     const rr = Math.min(r, w / 2, h / 2);
     viewport.ctx.beginPath();
@@ -1317,26 +1351,46 @@ export function createRenderer({ session, viewport, systems }) {
       viewport.ctx.fillStyle = v;
       viewport.ctx.fillRect(0, 0, viewport.W, viewport.H);
     }
-    if (!session.state.grotto && !session.state.moonshot) {
-      systems.hud.drawPreyIndicators();
-      systems.hud.drawClosingHint();
-      drawBirdLens();
-      drawSunIndicator();
-      if (session.screen === 'hunt') drawHazardWarnings();
-    }
     if (session.state.crash && session.state.crash.t >= CRASH_REVEAL_DELAY) {
       viewport.ctx.fillStyle = `rgba(0,0,0,${Math.min(1, (session.state.crash.t - CRASH_REVEAL_DELAY) / 0.5) * 0.35})`;
       viewport.ctx.fillRect(0, 0, viewport.W, viewport.H);
     }
-    if (session.screen === 'hunt') {
-      systems.hud.drawHUD();
-      if (session.paused) systems.hud.drawPausePanel();
-      if (!session.state.over) systems.hud.drawPauseButton();
-    } else if (session.screen === 'recap') {
-      systems.screens.drawRecap();
-    } else {
-      systems.screens.drawShop();
+    const worldCtx = viewport.ctx, hudCtx = viewport.overlayCtx;
+    hudCtx.setTransform(1, 0, 0, 1, 0, 0);
+    hudCtx.globalAlpha = 1;
+    hudCtx.globalCompositeOperation = 'source-over';
+    hudCtx.filter = 'none';
+    hudCtx.setLineDash([]);
+    hudCtx.clearRect(0, 0, viewport.W, viewport.H);
+    textCallCount = 0;
+    if (viewport.resolutionScale < 1) {
+      worldCtx.fillText = function (...args) { recordText(this, 'fillText', args); };
+      worldCtx.strokeText = function (...args) { recordText(this, 'strokeText', args); };
     }
+    try {
+      if (!session.state.grotto && !session.state.moonshot) {
+        systems.hud.drawPreyIndicators();
+        systems.hud.drawClosingHint();
+        drawBirdLens();
+        drawSunIndicator();
+        if (session.screen === 'hunt') drawHazardWarnings();
+      }
+      if (session.screen === 'hunt') {
+        systems.hud.drawHUD();
+        if (session.paused) systems.hud.drawPausePanel();
+        if (!session.state.over) systems.hud.drawPauseButton();
+      } else if (session.screen === 'recap') {
+        systems.screens.drawRecap();
+      } else {
+        systems.screens.drawShop();
+      }
+    } finally {
+      if (viewport.resolutionScale < 1) {
+        delete worldCtx.fillText;
+        delete worldCtx.strokeText;
+      }
+    }
+    if (viewport.resolutionScale < 1) drawTextOverlay();
   }
 
   // The flight to the moon (screen space): the sky drains to black, the Earth drops away and the moon swells

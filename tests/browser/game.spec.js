@@ -20,9 +20,9 @@ test.afterEach(async ({ page }) => {
 });
 
 test('draws a responsive, nonblank game and preserves controls', async ({ page }, testInfo) => {
-  await expect(page.locator('canvas')).toBeVisible();
+  await expect(page.locator('#game')).toBeVisible();
   const drawing = await page.evaluate(() => {
-    const canvas = document.querySelector('canvas');
+    const canvas = document.querySelector('#game');
     const ctx = canvas.getContext('2d');
     const colors = new Set();
     for (let row = 1; row < 10; row++) {
@@ -38,9 +38,11 @@ test('draws a responsive, nonblank game and preserves controls', async ({ page }
   expect(drawing.height).toBe(Math.round(page.viewportSize().height * 0.75));
   expect(canvasMetrics.logicalWidth).toBe(page.viewportSize().width);
   expect(canvasMetrics.logicalHeight).toBe(page.viewportSize().height);
-  expect(await page.locator('canvas').evaluate(canvas => canvas.getBoundingClientRect().width)).toBe(page.viewportSize().width);
-  expect(await page.locator('canvas').evaluate(canvas => canvas.getBoundingClientRect().height)).toBe(page.viewportSize().height);
-  expect(drawing.colors).toBeGreaterThan(10);
+  expect(canvasMetrics.hudWidth).toBe(canvasMetrics.logicalWidth);
+  expect(canvasMetrics.hudHeight).toBe(canvasMetrics.logicalHeight);
+  expect(await page.locator('#game').evaluate(canvas => canvas.getBoundingClientRect().width)).toBe(page.viewportSize().width);
+  expect(await page.locator('#game').evaluate(canvas => canvas.getBoundingClientRect().height)).toBe(page.viewportSize().height);
+  expect(drawing.colors).toBeGreaterThan(5);
   await page.mouse.move(page.viewportSize().width - 10, 65);
   await expect.poll(() => page.evaluate(() => window.__falconDiveDebug.bird.angle)).toBeGreaterThan(0.05);
   await page.mouse.down();
@@ -91,6 +93,8 @@ test('pause menu graphics presets update resolution and persist', async ({ page 
     expect(result.paused).toBe(true);
     expect(result.canvas.resolutionScale).toBe(scale);
     expect(result.canvas.width).toBe(Math.round(result.canvas.logicalWidth * scale));
+    expect(result.canvas.hudWidth).toBe(result.canvas.logicalWidth);
+    expect(result.canvas.hudHeight).toBe(result.canvas.logicalHeight);
     expect(result.saved).toBe(preset);
   }
   await page.reload();
@@ -236,7 +240,7 @@ test('fully unlocked shop exposes every tile without scrolling or overlapping co
     await page.mouse.click(tile.x + tile.w / 2, tile.y + tile.h / 2);
     const selection = await page.evaluate(() => {
       const game = window.__falconDiveDebug;
-      const ctx = document.querySelector('canvas').getContext('2d');
+      const ctx = document.querySelector('#hud-overlay').getContext('2d');
       const original = ctx.fillText;
       const text = [];
       let inShop = false;
@@ -279,8 +283,10 @@ test('speedometer stays bottom-left and horizontal focus shows energy and lock s
     game.session.paused = true;
     game.bird.brakeE = energy;
     game.bird.brakeLocked = locked;
-    const ctx = document.querySelector('canvas').getContext('2d');
-    const originals = { arc: ctx.arc, fillRect: ctx.fillRect, fillText: ctx.fillText, moveTo: ctx.moveTo, lineTo: ctx.lineTo };
+    const ctx = document.querySelector('#game').getContext('2d');
+    const textCtx = document.querySelector('#hud-overlay').getContext('2d');
+    const originals = { arc: ctx.arc, fillRect: ctx.fillRect, moveTo: ctx.moveTo, lineTo: ctx.lineTo };
+    const originalText = textCtx.fillText;
     const arcs = [], fills = [], text = [], points = [];
     ctx.arc = function (x, y, r, ...args) {
       arcs.push({ x, y, r });
@@ -290,9 +296,9 @@ test('speedometer stays bottom-left and horizontal focus shows energy and lock s
       fills.push({ x, y, w, h, color: this.fillStyle });
       return originals.fillRect.call(this, x, y, w, h);
     };
-    ctx.fillText = function (label, x, y, ...args) {
+    textCtx.fillText = function (label, x, y, ...args) {
       text.push({ label: String(label), x, y });
-      return originals.fillText.call(this, label, x, y, ...args);
+      return originalText.call(this, label, x, y, ...args);
     };
     ctx.moveTo = function (x, y) {
       points.push({ kind: 'move', x, y, color: this.strokeStyle });
@@ -302,7 +308,7 @@ test('speedometer stays bottom-left and horizontal focus shows energy and lock s
       points.push({ kind: 'line', x, y, color: this.strokeStyle });
       return originals.lineTo.call(this, x, y);
     };
-    try { game.render(); } finally { Object.assign(ctx, originals); }
+    try { game.render(); } finally { Object.assign(ctx, originals); textCtx.fillText = originalText; }
     return { arcs, fills, text, points };
   }, { energy, locked });
   const { width, height } = page.viewportSize();
@@ -346,7 +352,7 @@ test('eyas ammo stays visible and notices wrap above the flight area', async ({ 
     game.state.msg = 'A goshawk is hunting you! Break away from its dive.';
     game.state.msgT = 3;
     game.state.toast = { text: 'New upgrade unlocked in the Roost: Armed Eyases', t: 4 };
-    const ctx = document.querySelector('canvas').getContext('2d');
+    const ctx = document.querySelector('#hud-overlay').getContext('2d');
     const original = ctx.fillText;
     const text = [];
     ctx.fillText = function (label, x, y, ...args) {
@@ -395,7 +401,7 @@ test('recent catch names and all modifiers wrap separately from warnings and exp
     const caught = { kind: 'flock', label: 'TURTLE STRIKE! Starling', pts: 240, count: 3, speed: 20, tags, t: 10 };
     game.state.lastCatch = caught;
     game.state.catchLog = [caught];
-    const ctx = document.querySelector('canvas').getContext('2d');
+    const ctx = document.querySelector('#hud-overlay').getContext('2d');
     const original = ctx.fillText;
     let text = [];
     ctx.fillText = function (label, x, y, ...args) {
@@ -453,10 +459,11 @@ test('right-side statuses stay below a busy catch log and inside the viewport', 
       game.state.msg = 'A goshawk is hunting you!';
       game.state.msgT = 3;
       game.state.toast = { text: 'New upgrade unlocked in the Roost: Rifle', t: 4 };
-      const ctx = document.querySelector('canvas').getContext('2d');
-      const originalText = ctx.fillText, originalRect = ctx.fillRect;
+      const ctx = document.querySelector('#game').getContext('2d');
+      const textCtx = document.querySelector('#hud-overlay').getContext('2d');
+      const originalText = textCtx.fillText, originalRect = ctx.fillRect;
       const text = [], cards = [];
-      ctx.fillText = function (label, x, y, ...args) {
+      textCtx.fillText = function (label, x, y, ...args) {
         text.push({ label: String(label), x, y, width: this.measureText(label).width });
         return originalText.call(this, label, x, y, ...args);
       };
@@ -464,7 +471,7 @@ test('right-side statuses stay below a busy catch log and inside the viewport', 
         if (w === 92 && h === 50) cards.push({ x, y, w, h });
         return originalRect.call(this, x, y, w, h);
       };
-      try { game.render(); } finally { ctx.fillText = originalText; ctx.fillRect = originalRect; }
+      try { game.render(); } finally { textCtx.fillText = originalText; ctx.fillRect = originalRect; }
       return { text, cards };
     }, armed);
     expect(drawing.cards.length).toBeGreaterThan(0);
