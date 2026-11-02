@@ -36,7 +36,7 @@ const LENS_R = 38;
 const ABOVE_CEILING_DRAG = 0.35; // thin air above the ceiling: no flapping, but less drag
 const PAUSE_BTN = { x: 10, y: 10, w: 44, h: 44 };
 const DUST_DEVILS_ENABLED = false;
-const TALON_GRAB_RANGE = 18;
+const TALON_GRAB_RANGE = 8;
 
 // ---------- Input ----------
 const mouse = { x: W / 2, y: H / 2, down: false, sliderDrag: false, sliderKind: null, aiming: false, talonTarget: null };

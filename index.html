@@ -20,16 +20,12 @@ addEventListener('resize', resize); resize();
 // ---------- Tunables ----------
 const G = 9.81;               // gravity m/s²
 const MAX_ALT = 500;
-const DRAG = G / (95 * 95);   // terminal dive ~95 m/s (~340 km/h)
+const DRAG = G / (95 * 95);   // base drag; terminal dive speed scales with the Streamlining upgrade
 const BRAKE_DRAG = DRAG * 10;
-const FLAP_THRUST = 30;       // m/s² while flapping
-const FLAP_MAX_SPEED = 50;    // flapping can't push past this
 const STALL_SPEED = 10;
 const DIVE_SPEED = 40;        // above this (and pointing down) = dive mode
 const SAFE_VSPEED = 14;       // max descent rate on ground contact (m/s)
 const CRASH_REVEAL_DELAY = 0.9;
-const BRAKE_DURATION = 2.5;   // seconds of continuous braking from a full meter
-const BRAKE_RECHARGE = 5;     // seconds to refill from empty
 const BRAKE_UNLOCK = 0.3;     // after running dry, the meter must refill this far before braking again
 const SHELL_CRACK_SPEED = 65; // m/s impact needed to crack a dropped turtle (~215 m free fall from rest)
 const TURTLE_THROW = 10;      // m/s max extra push toward the cursor when releasing an aimed throw
@@ -37,7 +33,6 @@ const THROW_LOCK_GROUND = 20; // m from the predicted landing spot to lock onto 
 const THROW_LOCK_AIR = 15;    // m from the predicted arc to lock onto a flying animal
 const TURTLE_HOMING = 5;      // m/s² of sideways correction toward a locked target while falling
 const SHADOW_VISIBLE_ALT = 125; // the bird casts a visibly noticeable shadow only below this height
-const SHADOW_DETECT_ALT = 75; // dark shadow crossings only trigger prey below this height
 const SHADOW_SPOOK_RANGE = 100; // shadow crossing within this horizontal distance is enough to spook prey
 const shadowWorldX = () => bird.x + shadowOffset(bird.alt);
 const shadowMaxReach = p => p.kind === 'squirrel' ? SHADOW_SPOOK_RANGE * 1.35 : p.kind === 'mouse' ? SHADOW_SPOOK_RANGE * 1.1 : SHADOW_SPOOK_RANGE;
@@ -46,21 +41,153 @@ const shadowInFront = p => {
   return (dx * (facing(p) || 1) > 0 && Math.abs(dx) < SHADOW_SPOOK_RANGE);
 };
 const STARLING_COMBO_TIME = 2;    // seconds to grab more starlings after the first
-const STARLING_EXTRA_PTS = 150;
 const VIEW_MARGIN = 70;       // px kept between the top of the screen and the bird
-const ZOOM_CAP_ALT = 200;     // never zoom out further than needed to show this much height
 const AIR_FOCUS_DIST = 70;    // metres; closer than this to a flying target and the camera frames the chase
-const CAMERA_LEAD = 1.25;    // visual lead: makes the world scroll a bit faster without changing flight math or HUD speeds
+// View height in metres = base + perSpeed·speed + perAlt·altitude, capped at max
+const CAMERA_VIEW = { base: 25, perSpeed: 1.5, perAlt: 0.45, max: 300 };
+const CHASE_ZOOM_MAX = 2.2;   // air-chase zoom never exceeds this × the normal zoom
+// Soft ground framing: zoom out by up to (1 - zoomOut) to fit the ground with the bird `top` from the screen
+// top, and pull the view toward the ground by `stick` (0 = pure bird-centred, 1 = ground always on the band);
+// `fade` sets how far above the band (in band heights) the pull keeps working
+const GROUND_FRAME = { top: 0.2, stick: 0.6, zoomOut: 0.58, fade: 2.6 };
+function groundFitZoom(z) {
+  const fit = (H * (1 - GROUND_FRAME.top) - groundPx()) / Math.max(1, bird.alt);
+  return Math.max(Math.min(z, fit), z * GROUND_FRAME.zoomOut);
+}
+const CEILING_MARGIN = 12;    // m of sky shown above the ceiling at most
+const CHASE_MIN_FLY = 0.8;    // s a bird must be airborne before the camera will frame a chase on it
+const TURN_TIME = 1.2;        // s for a calm animal to turn around (body and gaze); spooked ones turn 3× faster
 const lerp = (a, b, t) => a + (b - a) * t;
 const groundPx = () => Math.max(90, H * 0.15); // screen space reserved for ground
+const HILL_SCROLL = 0.5;      // px the far hills scroll per metre flown, independent of zoom
 const LENS_R = 38;
 const ABOVE_CEILING_DRAG = 0.35; // thin air above the ceiling: no flapping, but less drag
 const PAUSE_BTN = { x: 10, y: 10, w: 44, h: 44 };
 const DUST_DEVILS_ENABLED = false;
-const TALON_GRAB_RANGE = 18;
+
+// ---------- Progression ----------
+// A day runs from the Early Riser start hour to 20:00; clockText() maps tod -> hour as tod * 24 + 1.2
+const todForHour = h => (h - 1.2) / 24;
+const DAY_END_HOUR = 20;
+const DUSK_WARN_HOUR = 19.5;
+const CHAIN_TIME = 20, CHAIN_STEP = 0.2, CHAIN_MAX = 2;
+const STARLING_EXTRA = 4;     // $ per extra starling grabbed in a combo
+const BUZZARD_BOUNTY = 80;
+// Turtle-only targets: the predators that hunt you
+const HAZARD_BOUNTY = { cat: 200, hunter: 120, hawk: 150 };
+const HAZARD_NAME = { cat: 'Cat', hunter: 'Hunter', hawk: 'Goshawk' };
+const UPGRADE_COSTS = [40, 100, 220, 450];
+// Per-tier stat tables (index = tier)
+const STATS = {
+  thrust:     [30, 37, 44, 52, 60],             // m/s² while flapping
+  flapMax:    [180, 198, 216, 234, 252],        // km/h flapping speed cap
+  stream:     [1, 1.1, 1.22, 1.35, 1.5],        // terminal dive speed multiplier
+  agility:    [1, 1.2, 1.4, 1.6, 1.85],
+  brakeDur:   [2.5, 3.4, 4.4, 5.5, 7.0],        // seconds of braking from a full meter
+  brakeRef:   [5.0, 4.2, 3.5, 2.9, 2.4],        // seconds to refill from empty
+  noise:      [1, 0.8, 0.62, 0.47, 0.35],
+  // Stealth: prey sight, shadow, and how buzzards treat you
+  sight:      [1, 0.85, 0.72, 0.6, 0.5],
+  shadowAlt:  [75, 60, 48, 38, 30],             // prey only notice your shadow below this height
+  steal:      [6, 4.5, 3.5, 2.5, 1.5],          // s a fresh catch can be stolen
+  notice:     [150, 120, 95, 75, 55],           // m buzzards notice a prize from
+  catchAlt:   [1, 1.25, 1.5, 1.75, 2],          // ground catch height multiplier
+  airReach:   [1, 1.15, 1.3, 1.45, 1.6],        // air strike radius multiplier
+  startHour:  [8, 7, 6.5, 6],
+};
+const fmtHour = h => `${String(Math.floor(h)).padStart(2, '0')}:${String(Math.round((h % 1) * 60)).padStart(2, '0')}`;
+const topKmh = (t = tier('stream')) => Math.round(Math.sqrt(G / (DRAG / STATS.stream[t] ** 2 * 0.8)) * 3.6);
+// Hold-right-click aiming is always available; the track improves the throw itself
+const AIM_LEVELS = ['Aimed throw', 'Strong throw (1.8× push)', 'Homing turtle (locks & homes)', 'Ricochet (bounces to 2 more targets)'];
+const AIM_STATS = { push: [10, 18, 18, 18], homing: [0, 0, 6, 8], lock: [0, 0, 1, 1.3], bounces: [0, 0, 0, 2] };
+const RICOCHET_RANGE = 80; // m a ricocheting shell looks for its next target
+const UPGRADES = [
+  { id: 'muscles', name: 'Flight Muscles', desc: 'Faster acceleration and flapping speed',
+    stat: t => `${STATS.thrust[t]} m/s² · ${STATS.flapMax[t]} km/h` },
+  { id: 'stream', name: 'Streamlining', desc: 'Less drag: higher top dive speed', stat: t => `top ${topKmh(t)} km/h` },
+  { id: 'agility', name: 'Agility', desc: 'Turn faster at every speed', stat: t => `turning ×${STATS.agility[t]}` },
+  { id: 'focus', name: 'Focus', desc: 'Bigger brake / slow-mo meter, faster refill',
+    stat: t => `${STATS.brakeDur[t]} s · refill ${STATS.brakeRef[t]} s` },
+  { id: 'silent', name: 'Silent Feathers', desc: 'Make less noise flapping, braking, diving', stat: t => `noise ×${STATS.noise[t]}` },
+  { id: 'stealth', name: 'Stealth', desc: 'Prey and buzzards spot you later; less gets stolen',
+    stat: t => `sight ×${STATS.sight[t]} · shadow <${STATS.shadowAlt[t]} m · steal ${STATS.steal[t]} s` },
+  { id: 'talons', name: 'Talons', desc: 'Bigger catch window; longer turtle re-grab',
+    stat: t => `ground ×${STATS.catchAlt[t]} · air reach ×${STATS.airReach[t]}` },
+  { id: 'aim', name: 'Turtle Aim', desc: 'Stronger throws, then turtles that home and ricochet', costs: [60, 160, 350], stat: t => AIM_LEVELS[t] },
+  { id: 'early', name: 'Early Riser', desc: 'Start hunting earlier in the day', costs: [75, 180, 350],
+    stat: t => `start ${fmtHour(STATS.startHour[t])}` },
+  { id: 'shell', name: 'Packed Lunch', desc: 'Start each day with a turtle in your talons', costs: [60],
+    stat: t => t ? 'start carrying a turtle' : 'start empty-handed' },
+  { id: 'rifle', name: 'Rifle', desc: 'Free aim, auto-fire, bazooka · armed at start from 6 shots',
+    costs: [40, 90, 160, 280, 450], locked: () => !progress.gunFound,
+    stat: t => `${GUN_LEVELS[t]} · ${GUN_STATS.ammo[t]} ${t >= 5 ? 'rockets' : 'shots'}` },
+  { id: 'eyas', name: 'Eyas Brood', desc: 'Young hawks fly with you and hunt nearby prey for a 50% share', costs: [120, 260, 480],
+    stat: t => t ? `${EYAS.count[t]} eyas${t > 1 ? 'es' : ''} · ${Math.round(EYAS.speed[t] * 3.6)} km/h · ${EYAS.range[t]} m` : 'hunting alone' },
+  { id: 'screech', name: 'Screech', desc: 'Press E: everything nearby freezes in fear (even cats and hunters)', costs: [90, 220],
+    stat: t => t ? `${SCREECH.radius[t]} m · ${SCREECH.freeze[t]} s freeze · every ${SCREECH.cool[t]} s` : 'no screech' },
+  { id: 'lucky', name: 'Lucky Feather', desc: 'Survive a fatal cat, hunter or goshawk attack each day', costs: [150, 400],
+    stat: t => `${LUCKY[t]} save${LUCKY[t] === 1 ? '' : 's'} per day` },
+];
+// Hunter rifle per Rifle tier: shots per gun, range (m), hit width (m), radius that spooks animals (m)
+const GUN_LEVELS = ['Straight ahead', 'Double shot', 'Free aim', 'Six-shooter', 'Auto-fire (hold)', 'Bazooka (14 m blast)'];
+const GUN_STATS = { ammo: [1, 2, 2, 6, 30, 8], range: [220, 240, 280, 320, 320, 400], width: [2.5, 2.5, 3, 3, 2.5, 3], spook: [150, 150, 150, 120, 120, 200] };
+const shopUpgrades = () => UPGRADES.filter(u => !u.locked || !u.locked());
+const upgradeCosts = u => u.costs || UPGRADE_COSTS;
+
+const PROGRESS_KEY = 'falconDive.progress';
+const freshProgress = () => ({ day: 1, money: 0, up: {}, best: { earned: 0, speed: 0 } });
+let progress = freshProgress();
+function loadProgress() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(PROGRESS_KEY));
+    if (saved && typeof saved === 'object') {
+      progress = { ...freshProgress(), ...saved, up: { ...(saved.up || {}) }, best: { ...freshProgress().best, ...(saved.best || {}) } };
+      // Camouflage + Buzzard Wariness merged into Stealth: keep the higher tier
+      const up = progress.up;
+      if (up.camo || up.wary) {
+        up.stealth = Math.max(up.stealth || 0, up.camo || 0, up.wary || 0);
+        delete up.camo; delete up.wary;
+      }
+    }
+  } catch { /* storage unavailable or corrupt */ }
+}
+function saveProgress() {
+  try { localStorage.setItem(PROGRESS_KEY, JSON.stringify(progress)); } catch { /* storage unavailable */ }
+}
+const tier = id => progress.up[id] || 0;
+function buyUpgrade(id) {
+  const u = UPGRADES.find(x => x.id === id);
+  if (!u || (u.locked && u.locked())) return false;
+  const t = tier(id), costs = upgradeCosts(u);
+  if (t >= costs.length || progress.money < costs[t]) return false;
+  progress.money -= costs[t];
+  progress.up[id] = t + 1;
+  saveProgress();
+  return true;
+}
+loadProgress();
+
+// Upgrade-driven flight and stealth stats
+const dragBase = () => DRAG / STATS.stream[tier('stream')] ** 2;
+const flapThrust = () => STATS.thrust[tier('muscles')];
+const flapMaxSpeed = () => STATS.flapMax[tier('muscles')] / 3.6;
+const brakeDuration = () => STATS.brakeDur[tier('focus')];
+const brakeRecharge = () => STATS.brakeRef[tier('focus')];
+const shadowDetectAlt = () => STATS.shadowAlt[tier('stealth')];
+// Sprites shrink as the camera zooms out (down to SPRITE_MIN), so things that look close really are close
+const SPRITE_REF_ZOOM = 5, SPRITE_MIN = 0.5;
+const spriteK = () => clamp(cam.zoom / SPRITE_REF_ZOOM, SPRITE_MIN, 1);
+// Air strike reach: ~22 px of (zoom-shrunk) sprite on screen, min 3 m, widened by Talons. Re-grabbing a falling turtle needs half that.
+const airCatchRadius = () => Math.max(3, 22 * spriteK() / cam.zoom) * STATS.airReach[tier('talons')];
+const talonGrabRange = () => airCatchRadius() * 0.5;
+const stealWindow = () => STATS.steal[tier('stealth')];
+const aimTier = () => tier('aim');
+const throwPush = () => AIM_STATS.push[aimTier()];
+const turtleHoming = () => AIM_STATS.homing[aimTier()];
+const lockScale = () => AIM_STATS.lock[aimTier()];
 
 // ---------- Input ----------
-const mouse = { x: W / 2, y: H / 2, down: false, sliderDrag: false, sliderKind: null, aiming: false, talonTarget: null, throwHeld: false };
+const mouse = { x: W / 2, y: H / 2, down: false, sliderDrag: false, sliderKind: null, aiming: false, talonTarget: null, throwHeld: false, steer: null };
 const inPauseBtn = (x, y) =>
   x >= PAUSE_BTN.x && x <= PAUSE_BTN.x + PAUSE_BTN.w && y >= PAUSE_BTN.y && y <= PAUSE_BTN.y + PAUSE_BTN.h;
 
@@ -172,6 +299,10 @@ loadSettings();
 
 canvas.addEventListener('mousemove', e => {
   mouse.x = e.clientX; mouse.y = e.clientY;
+  if (screen !== 'hunt') {
+    canvas.style.cursor = uiHit(e.clientX, e.clientY) ? 'pointer' : 'default';
+    return;
+  }
   if (paused && mouse.sliderDrag && mouse.sliderKind) {
     setAnimalScaleFromClientX(mouse.sliderKind, e.clientX);
   }
@@ -182,17 +313,26 @@ canvas.addEventListener('mousemove', e => {
   canvas.style.cursor = inPauseBtn(e.clientX, e.clientY) ? 'pointer' : 'crosshair';
 });
 canvas.addEventListener('mousedown', e => {
+  if (screen !== 'hunt') {
+    if (e.button === 0) clickUI(e.clientX, e.clientY);
+    return;
+  }
   if (state.crash && state.crash.t < CRASH_REVEAL_DELAY) return;
-  if (inPauseBtn(e.clientX, e.clientY)) { if (!state.over) togglePause(); return; }
+  if (state.over) { showRecap(); return; }
+  if (inPauseBtn(e.clientX, e.clientY)) { togglePause(); return; }
   if (paused) {
     paused = false;
     return;
   }
   if (e.button === 2) {
     if (bird.carrying) {
+      // Without the Aimed Throw upgrade, right-click just lets go
       mouse.aiming = true;
       mouse.throwHeld = true;
       mouse.talonTarget = null;
+      // Free aim: hold the current course while the cursor aims the gun
+      const a = birdAnchor();
+      mouse.steer = bird.carrying.kind === 'gun' && gunFreeAim() ? { dx: mouse.x - a.x, dy: mouse.y - a.y } : null;
       return;
     }
     const target = nearestFallingTurtle();
@@ -204,7 +344,6 @@ canvas.addEventListener('mousedown', e => {
     return;
   }
   mouse.down = true;
-  if (state.over) reset();
 });
 addEventListener('mouseup', e => {
   if (e.button !== 2) {
@@ -215,7 +354,8 @@ addEventListener('mouseup', e => {
   }
   if (mouse.aiming) {
     if (bird.carrying && mouse.throwHeld) {
-      dropTurtle(true);
+      if (bird.carrying.kind !== 'gun') dropTurtle(true);
+      else if (!gunAuto()) fireGun();
     } else if (mouse.talonTarget && nearestFallingTurtle() === mouse.talonTarget) {
       grabFallingTurtle(mouse.talonTarget);
     }
@@ -223,6 +363,7 @@ addEventListener('mouseup', e => {
   mouse.aiming = false;
   mouse.throwHeld = false;
   mouse.talonTarget = null;
+  mouse.steer = null;
   mouse.sliderDrag = false;
   mouse.sliderKind = null;
 });
@@ -231,8 +372,13 @@ canvas.addEventListener('contextmenu', e => e.preventDefault());
 let paused = false;
 function togglePause() { paused = !paused; mouse.down = false; mouse.sliderDrag = false; mouse.sliderKind = null; mouse.aiming = false; mouse.throwHeld = false; mouse.talonTarget = null; }
 addEventListener('keydown', e => {
+  if (screen !== 'hunt') {
+    if (e.key === 'Enter') { if (screen === 'recap') showShop(); else startDay(); }
+    return;
+  }
   if ((e.key === 'p' || e.key === 'P' || e.key === 'Escape') && !state.over) togglePause();
   if (e.key === ' ') { e.preventDefault(); dropTurtle(); }
+  if (e.key === 'e' || e.key === 'E') screech();
 });
 addEventListener('blur', () => { if (!state.over) paused = true; mouse.down = false; mouse.aiming = false; mouse.sliderDrag = false; mouse.sliderKind = null; });
 
@@ -248,16 +394,125 @@ function reset() {
            brakeE: 1, brakeLocked: false };
   prey = [];
   particles = [];
-  cam = { x: 0, alt: 220, zoom: 2.5, zoomY: 2.5, gz: 2.5, focus: 0, ft: null, shake: 0 };
-  state = { score: 0, catches: 0, over: false, msg: '', msgT: 0, maxSpeed: 0, nextGroundX: 150, nextAirX: 300,
+  cam = { x: 0, alt: 220, zoom: 2.5, zoomY: 2.5, gz: NaN, ox: NaN, oa: NaN, focus: 0, ft: null, shake: 0, lock: null, pin: null };
+  state = { score: 0, catches: 0, over: false, msg: '', msgT: 0, msgTags: '', maxSpeed: 0, spawn: newSpawnWindow(0),
             hearingRadius: 8, crash: null,
-            catchLog: [], time: 0, wake: [], wakeT: 0, fallers: [], rings: [],
+            catchLog: [], time: 0, wake: [], wakeT: 0, fallers: [], rings: [], guns: [], tracers: [], rockets: [], blasts: [], fish: [],
             wind: { x: (Math.random() * 2 - 1) * 6, target: 0, changeT: 0, hx: (Math.random() * 2 - 1) * 10, htarget: 0, hchangeT: 0 },
             cloudOff: 0, cirrusOff: 0, fog: 0,
-            tod: 0.3, storm: { t: 0, dur: 1, next: 90 + Math.random() * 90, dir: 1, k: 0, flash: 0 },
-            devils: [], devilT: 15, rivals: [], rivalSeen: {}, nextLakeI: 0, lastCatch: null };
+            tod: todForHour(STATS.startHour[tier('early')]), storm: { t: 0, dur: 1, next: 90 + Math.random() * 90, dir: 1, k: 0, flash: 0 },
+            devils: [], devilT: 15, rivals: [], rivalSeen: {}, hazards: newHazards(), lastCatch: null,
+            day: progress.day, dayCounts: {}, chainN: 0, chainT: -Infinity, bestChain: 1, steals: [],
+            duskWarned: false, sunset: false, overT: 0, recap: null, eyases: [], featherFx: [], feathers: 0, screechCD: 0 };
   spawnPreyAhead();
 }
+
+// ---------- Day flow ----------
+// 'hunt' → (sunset or crash) → 'recap' → 'shop' → next day's 'hunt'
+let screen = 'hunt';
+let uiButtons = [];
+let uiT = 0;
+let confirmReset = false;
+const huntHour = () => state.tod * 24 + 1.2;
+
+function endDay(reason) {
+  if (state.over) return;
+  state.over = true;
+  state.overT = 0;
+  mouse.down = false; mouse.aiming = false; mouse.throwHeld = false; mouse.talonTarget = null;
+  const earned = Math.max(0, state.score);
+  const records = [];
+  if (earned > progress.best.earned) {
+    if (progress.best.earned > 0) records.push(`Best day ever: $${earned}`);
+    progress.best.earned = earned;
+  }
+  const topSpeed = Math.round(state.maxSpeed * 3.6);
+  if (topSpeed > progress.best.speed) {
+    if (progress.best.speed > 0) records.push(`Top speed record: ${topSpeed} km/h`);
+    progress.best.speed = topSpeed;
+  }
+  state.recap = { day: state.day, reason, clock: clockText(), earned, walletBefore: progress.money,
+                  catches: state.catchLog.slice(), steals: state.steals.slice(), topSpeed, bestChain: state.bestChain, records };
+  progress.money += earned;
+  progress.day = state.day + 1;
+  saveProgress();
+}
+function showRecap() {
+  if (!state.recap) return;
+  screen = 'recap'; uiT = 0; paused = false;
+}
+function showShop() {
+  screen = 'shop'; uiT = 0; confirmReset = false;
+}
+function startDay() {
+  reset();
+  // Starting turtle in the talons; a starting rifle then waits on the ground right below
+  const armed = tier('rifle') >= 3;
+  if (tier('shell')) bird.carrying = { kind: 'turtle' };
+  if (armed && !bird.carrying) bird.carrying = { kind: 'gun', ammo: gunStat('ammo') };
+  else if (armed) state.guns.push({ x: bird.x + 15, alt: 0, vx: 0, vy: 0, ammo: gunStat('ammo') });
+  state.feathers = LUCKY[tier('lucky')];
+  spawnEyases();
+  screen = 'hunt'; paused = false;
+  mouse.down = false;
+  canvas.style.cursor = 'crosshair';
+}
+function resetProgress() {
+  progress = freshProgress();
+  saveProgress();
+  confirmReset = false;
+}
+
+function uiHit(x, y) {
+  return uiButtons.find(b => b.enabled !== false && x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h);
+}
+function clickUI(x, y) {
+  const b = uiHit(x, y);
+  if (b) b.onClick();
+}
+
+// ---------- Scoring ----------
+// $ = (bounty × repeat fatigue × (1 + bonuses) + first-of-species) × chain. dry = preview only (no side effects)
+function priceCatch(kind, o = {}, dry = false) {
+  const n = state.dayCounts[kind] || 0;
+  const tags = [];
+  let base = kind === 'buzzard' ? BUZZARD_BOUNTY : HAZARD_BOUNTY[kind] ?? SPECIES[kind].bounty;
+  if (o.turtleHit && SPECIES[kind]) { base *= 3; tags.push('Turtle ×3'); }
+  const fatigue = Math.max(0.4, 0.8 ** n);
+  if (fatigue < 1) tags.push(`Repeat ×${fatigue.toFixed(2)}`);
+  let bonus = 0;
+  if (o.speed != null) {
+    const kmh = o.speed * 3.6;
+    const sp = kmh >= 300 ? ['Stoop', 1] : kmh >= 220 ? ['Blistering', 0.5] : kmh >= 150 ? ['Fast', 0.25] : null;
+    if (sp) { bonus += sp[1]; tags.push(`${sp[0]} +${sp[1] * 100}%`); }
+  }
+  if (o.minAlt != null) {
+    // Skim: pull out within the lowest 30% of the species' base catch height
+    const skim = 0.5 * clamp(1 - o.minAlt / (0.3 * o.catchAlt), 0, 1);
+    if (skim >= 0.05) { bonus += skim; tags.push(`Skim +${Math.round(skim * 100)}%`); }
+  }
+  if (o.unseen) { bonus += 0.5; tags.push('Unseen +50%'); }
+  if (o.skeet) { bonus += 1; tags.push('Skeet +100%'); }
+  if (o.below) { bonus += 1; tags.push('From below +100%'); }
+  if (o.impact != null) {
+    const imp = Math.max(0, Math.floor((o.impact - SHELL_CRACK_SPEED) * 3.6 / 10)) * 0.05;
+    if (imp > 0) { bonus += imp; tags.push(`Impact +${Math.round(imp * 100)}%`); }
+  }
+  const fresh = n === 0 ? 10 : 0;
+  if (fresh) tags.push('Fresh +$10');
+  const chainN = state.time - state.chainT <= CHAIN_TIME ? state.chainN + 1 : 0;
+  const chain = Math.min(CHAIN_MAX, 1 + CHAIN_STEP * chainN);
+  if (chain > 1) tags.push(`Chain ×${chain.toFixed(1)}`);
+  if (o.share) tags.push(`Eyas share ×${o.share}`);
+  if (!dry) {
+    state.dayCounts[kind] = n + 1;
+    state.chainN = chainN; state.chainT = state.time;
+    state.bestChain = Math.max(state.bestChain, chain);
+  }
+  return { value: Math.round((base * fatigue * (1 + bonus) + fresh) * chain * (o.share ?? 1)), tags };
+}
+const chainMult = () => state.time - state.chainT <= CHAIN_TIME ? Math.min(CHAIN_MAX, 1 + CHAIN_STEP * state.chainN) : 1;
+function breakChain() { state.chainN = 0; state.chainT = -Infinity; }
 
 window.__falconDiveDebug = {
   get bird() { return bird; },
@@ -274,6 +529,7 @@ window.__falconDiveDebug = {
   sensesFor(p) { return sensesInfo(p); },
   sensed(p, dt = 1 / 60) { return sensed(p, dt); },
   step(dt = 1 / 60) { update(dt); return this.snapshot(); },
+  render() { draw(); },
   loop(frames = 60, dt = 1 / 60) {
     const out = [];
     for (let i = 0; i < frames; i++) {
@@ -283,6 +539,10 @@ window.__falconDiveDebug = {
     return out;
   },
   reset,
+  get cam() { return cam; },
+  get progress() { return progress; },
+  get screen() { return screen; },
+  priceCatch, endDay, showRecap, showShop, startDay, buyUpgrade, resetProgress, saveProgress,
   setBird(x = bird.x, alt = bird.alt, speed = bird.speed) {
     bird.x = x; bird.alt = alt; bird.speed = speed; bird.vx = bird.vx ?? 0; bird.vy = bird.vy ?? 0;
     return bird;
@@ -291,17 +551,21 @@ window.__falconDiveDebug = {
 
 // ---------- Prey species ----------
 // scale: on-screen sprite size (deliberately larger than true scale so animals read clearly)
+// bounty: base $ value, priced by how common and how hard each animal is
 const SPECIES = {
-  rabbit:   { name: 'Rabbit',   air: false, pts: 100, weight: 40, catchAlt: 1.5, radius: 6, scale: 1.9 },
-  hare:     { name: 'Hare',     air: false, pts: 200, weight: 20, catchAlt: 1.5, radius: 6, scale: 2.3 },
-  mouse:    { name: 'Mouse',    air: false, pts: 80,  weight: 20, catchAlt: 0.8, radius: 3, scale: 2.15 },
-  squirrel: { name: 'Squirrel', air: false, pts: 250, weight: 12, catchAlt: 1.5, radius: 5, scale: 1.7 },
-  turtle:   { name: 'Turtle',   air: false, pts: 300, weight: 8,  catchAlt: 1.5, radius: 6, scale: 2.45 },
+  rabbit:   { name: 'Rabbit',   air: false, bounty: 5,  weight: 40, catchAlt: 1.5, radius: 6, scale: 1.9 },
+  hare:     { name: 'Hare',     air: false, bounty: 15, weight: 20, catchAlt: 1.5, radius: 6, scale: 2.3 },
+  mouse:    { name: 'Mouse',    air: false, bounty: 8,  weight: 20, catchAlt: 0.8, radius: 3, scale: 2.15 },
+  squirrel: { name: 'Squirrel', air: false, bounty: 22, weight: 12, catchAlt: 1.5, radius: 5, scale: 1.7 },
+  turtle:   { name: 'Turtle',   air: false, bounty: 30, weight: 8,  catchAlt: 1.5, radius: 6, scale: 2.45 },
   // minStrike: your own speed needed; minRel: speed relative to the prey needed (both m/s, written as km/h / 3.6)
-  pigeon:   { name: 'Pigeon',   air: true,  pts: 300, weight: 40, minStrike: 90 / 3.6, minRel: 54 / 3.6, alt: [30, 200], speed: 18, scale: 1.45 },
-  duck:     { name: 'Duck',     air: true,  pts: 400, weight: 20, minStrike: 120 / 3.6, minRel: 72 / 3.6, alt: [20, 120], speed: 25, scale: 1.7 },
-  swift:    { name: 'Swift',    air: true,  pts: 500, weight: 15, minStrike: 60 / 3.6, minRel: 36 / 3.6, alt: [40, 250], speed: 22, scale: 2.0 },
-  flock:    { name: 'Starling', air: true,  pts: 350, weight: 25, minStrike: 0, minRel: 0, alt: [80, 300], speed: 15, scale: 2.7 },
+  pigeon:   { name: 'Pigeon',   air: true,  bounty: 10, weight: 40, minStrike: 90 / 3.6, minRel: 54 / 3.6, alt: [30, 200], speed: 18, scale: 1.45 },
+  duck:     { name: 'Duck',     air: true,  bounty: 45, weight: 20, minStrike: 120 / 3.6, minRel: 72 / 3.6, alt: [20, 120], speed: 25, scale: 1.7 },
+  swift:    { name: 'Swift',    air: true,  bounty: 35, weight: 15, minStrike: 60 / 3.6, minRel: 36 / 3.6, alt: [40, 250], speed: 22, scale: 2.0 },
+  flock:    { name: 'Starling', air: true,  bounty: 8,  weight: 25, minStrike: 0, minRel: 0, alt: [80, 300], speed: 15, scale: 2.7 },
+  // Fish live in lakes (air: 'water' keeps them out of the land/air spawn pools); depth is metres below the surface
+  trout:    { name: 'Trout',    air: 'water', bounty: 30, weight: 0, depth: [0.6, 3], speed: 2.5, dart: 8, scale: 1.6 },
+  pike:     { name: 'Pike',     air: 'water', bounty: 75, weight: 0, depth: [3, 15], speed: 1.6, dart: 6, scale: 2 },
 };
 const ICON_SCALE = 2.0;   // sprite scale that maps to 1.0 in catch-card icons
 const FALCON_SCALE = 1.5; // minimum on-screen size of the player
@@ -358,38 +622,61 @@ function makeAir(x, kind = pickKind(true)) {
   return p;
 }
 
+// Prey live in a window around the bird that works in both directions. Each side has a spawn frontier that
+// moves outward as the bird flies; when prey beyond SPAWN_KEEP are culled, the frontier is pulled back
+// so that stretch is repopulated on a return visit.
+const SPAWN_REACH = 1500, SPAWN_KEEP = 2500;
+const groundGap = () => 150 + Math.random() * 300;
+const airGap = () => 250 + Math.random() * 350;
+function newSpawnWindow(x) {
+  return { gLo: x - 150, gHi: x + 150, aLo: x - 300, aHi: x + 300, lakes: new Set() };
+}
+
 function spawnPreyAhead() {
-  while (state.nextGroundX < bird.x + 1500) {
-    if (!lakeAtX(state.nextGroundX)) prey.push(makeGround(state.nextGroundX));
-    state.nextGroundX += 150 + Math.random() * 300;
-  }
-  while (state.nextAirX < bird.x + 1500) {
-    prey.push(makeAir(state.nextAirX));
-    state.nextAirX += 250 + Math.random() * 350;
-  }
-  // Ducks resting on each lake, ready to take off when they notice you
-  while (lakeAt(state.nextLakeI).x0 < bird.x + 1500) {
-    const l = lakeAt(state.nextLakeI++);
-    if (!l.on) continue;
+  let s = state.spawn;
+  const lo = bird.x - SPAWN_REACH, hi = bird.x + SPAWN_REACH;
+  const keepLo = bird.x - SPAWN_KEEP, keepHi = bird.x + SPAWN_KEEP;
+  // A jump past the whole window (e.g. a teleport) leaves nothing worth keeping; start a fresh window
+  if (s.gHi < keepLo || s.gLo > keepHi) s = state.spawn = newSpawnWindow(bird.x);
+  s.gHi = Math.min(s.gHi, keepHi); s.gLo = Math.max(s.gLo, keepLo);
+  s.aHi = Math.min(s.aHi, keepHi); s.aLo = Math.max(s.aLo, keepLo);
+  const ground = x => { if (!lakeAtX(x)) prey.push(makeGround(x)); };
+  for (; s.gHi < hi; s.gHi += groundGap()) ground(s.gHi);
+  for (; s.gLo > lo; s.gLo -= groundGap()) ground(s.gLo);
+  for (; s.aHi < hi; s.aHi += airGap()) prey.push(makeAir(s.aHi));
+  for (; s.aLo > lo; s.aLo -= airGap()) prey.push(makeAir(s.aLo));
+  // Ducks resting on each lake in reach, ready to take off when they notice you
+  for (let i = Math.floor((lo - 1300) / LAKE_SPACING); i <= Math.ceil((hi - 400) / LAKE_SPACING); i++) {
+    const l = lakeAt(i);
+    if (!l.on || s.lakes.has(i) || l.x0 > hi || l.x0 + l.w < lo) continue;
+    s.lakes.add(i);
     for (let n = 0; n < 2 + Math.floor(Math.random() * 3); n++) {
       const d = makeAir(l.x0 + l.w * (0.15 + Math.random() * 0.7), 'duck');
       Object.assign(d, { sitting: true, alt: 0.4, lake: l, vx: randDir() * (0.6 + Math.random() * 0.6) });
       prey.push(d);
     }
+    for (let n = 0; n < 4 + Math.floor(Math.random() * 4); n++) state.fish.push(makeFish(l, Math.random() < 0.7 ? 'trout' : 'pike'));
   }
-  prey = prey.filter(p => !p.gone && p.x > bird.x - 1000 && p.x < bird.x + 2500);
+  for (const i of s.lakes) {
+    const l = lakeAt(i);
+    if (l.x0 > keepHi || l.x0 + l.w < keepLo) s.lakes.delete(i);
+  }
+  prey = prey.filter(p => !p.gone && p.x > keepLo && p.x < keepHi);
+  state.fish = state.fish.filter(f => !f.gone && f.x > keepLo && f.x < keepHi);
 }
 
 // ---------- Senses ----------
 // Vision cone (world angle, up = positive) plus hearing that depends on how noisy the bird is
 // Flying birds watch forward and down (where they're going and the ground below), so a stoop from above or behind goes unseen
-const forwardDown = (p, tilt) => { const h = Math.atan2(p.vy, p.vx); return h + (Math.cos(h) >= 0 ? -tilt : tilt); };
+// Gaze follows the animal's eased facing (turnK), so it sweeps over the top while it turns around
+const forwardDown = (p, tilt) => { const k = turnK(p); return Math.atan2(p.vy, Math.abs(p.vx) * k) - tilt * k; };
+const groundLook = (p, up) => Math.atan2(Math.sin(up), Math.cos(up) * turnK(p));
 const SENSES = {
-  rabbit:    { range: 60,  half: 1.0, reaction: 0.45, look: p => (facing(p) > 0 ? 0.8 : Math.PI - 0.8) },
-  hare:      { range: 75,  half: 1.2, reaction: 0.3,  look: p => (facing(p) > 0 ? 0.9 : Math.PI - 0.9) }, // hare looks ahead; hearing is a simple full-circle radius
-  mouse:     { range: 50,  half: 0.9, reaction: 0.5,  look: p => (facing(p) > 0 ? 0.7 : Math.PI - 0.7) },
-  squirrel:  { range: 75,  half: 1.0, reaction: 0.5,  look: p => (facing(p) > 0 ? 0.8 : Math.PI - 0.8) }, // cone reaches down to the ground so it can see shadows
-  turtle:    { range: 35,  half: 0.8, reaction: 0.7,  look: p => (facing(p) > 0 ? 0.5 : Math.PI - 0.5) },
+  rabbit:    { range: 60,  half: 1.0, reaction: 0.45, look: p => groundLook(p, 0.8) },
+  hare:      { range: 75,  half: 1.2, reaction: 0.3,  look: p => groundLook(p, 0.9) }, // hare looks ahead; hearing is a simple full-circle radius
+  mouse:     { range: 50,  half: 0.9, reaction: 0.5,  look: p => groundLook(p, 0.7) },
+  squirrel:  { range: 75,  half: 1.0, reaction: 0.5,  look: p => groundLook(p, 0.8) }, // cone reaches down to the ground so it can see shadows
+  turtle:    { range: 35,  half: 0.8, reaction: 0.7,  look: p => groundLook(p, 0.5) },
   pigeon:    { range: 45,  half: 1.4, reaction: 0.25, look: p => forwardDown(p, 0.6) },
   duck:      { range: 70,  half: 1.3, reaction: 0.4,  look: p => (p.sitting ? forwardDown(p, -0.8) : forwardDown(p, 0.6)) }, // resting ducks watch the sky
   swift:     { range: 30,  half: 1.5, reaction: 0.1,  look: p => forwardDown(p, 0.5) },
@@ -399,7 +686,7 @@ const SENSES = {
 const diveNoise = () => 8 + Math.max(0, Math.min(1, (bird.speed - 42) / 53)) * 22;
 const hearingRange = () => state.hearingRadius;
 function updateHearingRange(dt) {
-  const target = Math.max(bird.mode === 'FLAP' ? 40 : bird.mode === 'BRAKE' ? 25 : 0, diveNoise());
+  const target = Math.max(bird.mode === 'FLAP' ? 40 : bird.mode === 'BRAKE' ? 25 : 0, diveNoise()) * STATS.noise[tier('silent')];
   const duration = target > state.hearingRadius ? 0.5 : 0.8;
   state.hearingRadius += (target - state.hearingRadius) * (1 - Math.exp(-dt / duration));
 }
@@ -411,9 +698,21 @@ const lookAngle = p => p.lookA ?? SENSES[p.kind].look(p);
 function updateLook(p, dt) {
   const target = SENSES[p.kind].look(p);
   if (p.lookA == null) { p.lookA = target; return; }
-  const diff = wrapAngle(target - p.lookA), max = 1.5 * dt;
+  const diff = wrapAngle(target - p.lookA), max = (p.spookT > 0 || p.alertT > 0 ? 3 : 1) * dt;
   p.lookA = wrapAngle(p.lookA + Math.max(-max, Math.min(max, diff)));
 }
+
+// Eased facing in [-1, 1]: animals swing round over ~TURN_TIME instead of flipping instantly
+const turnK = p => p.turn ?? (((p.face ?? p.vx) < 0) ? -1 : 1);
+function updateTurn(p, dt) {
+  const v = p.face ?? p.vx;
+  const want = v < 0 ? -1 : v > 0 ? 1 : (p.turn ?? 1);
+  if (p.turn == null) { p.turn = want; return; }
+  const rate = (2 / TURN_TIME) * (p.spookT > 0 || p.alertT > 0 ? 3 : 1);
+  p.turn += clamp(want - p.turn, -rate * dt, rate * dt);
+}
+// How much of its intended speed an animal can use while still turning (0 facing away → 1 fully round)
+const turnAlign = (p, vx) => (p.turn == null || !vx ? 1 : clamp(0.5 + 0.5 * p.turn * Math.sign(vx), 0, 1));
 
 // Idle wandering: reverse direction every few seconds rather than at random each frame
 function wanderFlip(p, dt) {
@@ -426,6 +725,8 @@ const hearingHalf = p => Math.PI;
 
 function sensesInfo(p) {
   if (p.hidden || IGNORE_DETECTION.has(p.kind)) return { reason: null, seen: false, heard: false };
+  // Nothing on land or in the air can make out a bird swimming more than a metre down
+  if (bird.inWater && bird.alt < -SUBMERGED_HIDE) return { reason: null, seen: false, heard: false };
   const s = SPECIES[p.kind].air && !p.sitting ? null : p;
   const sn = SENSES[p.kind] ?? { range: 30, half: 0.8, reaction: 0.5, look: () => 0 };
   const range = visionRange(sn);
@@ -436,7 +737,7 @@ function sensesInfo(p) {
 
   // Shadow checks use the animal's forward-facing cone. That keeps the shadow warning fair and avoids
   // shadow-only detection when the shadow falls outside the creature's actual field of view.
-  if (s && SHADOW_REACTORS.has(p.kind) && daylight() > 0.3 && bird.alt < SHADOW_DETECT_ALT) {
+  if (s && SHADOW_REACTORS.has(p.kind) && daylight() > 0.3 && bird.alt < shadowDetectAlt()) {
     const shadowDx = shadowWorldX() - p.x;
     const shadowDy = 0 - eyeAlt(p);
     const shadowAng = Math.atan2(shadowDy, shadowDx);
@@ -452,7 +753,8 @@ function senses(p) {
   return sensesInfo(p).reason != null;
 }
 
-const visionRange = sn => sn.range * (0.45 + 0.55 * daylight()); // everyone sees less in the dark
+// everyone sees less in the dark; Stealth shrinks how far prey can pick you out
+const visionRange = sn => sn.range * (0.45 + 0.55 * daylight()) * STATS.sight[tier('stealth')];
 
 // True once the bird has been noticed for longer than the animal's reaction time
 function sensed(p, dt) {
@@ -467,6 +769,7 @@ function sensed(p, dt) {
   if (sense.reason) {
     p.alertT = Math.max(p.alertT || 0, 0.8);
     p.lastSense = sense.reason;
+    p.noticed = true;
   }
   p.aware = sense.reason ? (p.aware || 0) + dt : Math.max(0, (p.aware || 0) - dt * 0.5);
   if (p.aware < SENSES[p.kind].reaction) return false;
@@ -620,9 +923,10 @@ function ridgeLift(x, alt) {
   return u;
 }
 
-const LAKE_SPACING = 2600;
+const LAKE_SPACING = 1300;
 function lakeAt(i) {
-  return { x0: i * LAKE_SPACING + 400 + wh(i * 6.1 + 5) * 900, w: 140 + wh(i * 7.3 + 6) * 160, on: wh(i * 8.9 + 7) < 0.6 };
+  return { x0: i * LAKE_SPACING + 400 + wh(i * 6.1 + 5) * 700, w: 150 + wh(i * 7.3 + 6) * 300, on: wh(i * 8.9 + 7) < 0.75,
+           depth: 10 + wh(i * 4.3 + 8) * 8 };
 }
 function lakeAtX(x) {
   const i = Math.floor((x - 400) / LAKE_SPACING);
@@ -767,6 +1071,7 @@ function updateGroundPrey(p, dt) {
     if (p.fadeT <= 0) { p.gone = true; return; }
   }
   if (vx !== 0) p.face = vx;
+  vx *= turnAlign(p, vx);
   p.curVx = vx;
   p.x += vx * dt;
 }
@@ -775,6 +1080,13 @@ function spookAir(p) {
   p.spookT = 3; p.alertT = 0.8;
   p.vx = (Math.sign(p.x - bird.x) || 1) * Math.abs(p.vx);
   if (p.kind === 'swift') p.h = Math.atan2(p.alt - bird.alt, p.x - bird.x);
+}
+
+// A duck resting on the water bursts into flight, away from the bird
+function duckTakeOff(p) {
+  if (!p.sitting) return;
+  p.sitting = false; p.alertT = 0.8; p.spookT = 2; p.noticed = true;
+  p.vx = (Math.sign(p.x - bird.x) || 1) * SPECIES[p.kind].speed * 0.6; p.vy = 8;
 }
 
 function updateAirPrey(p, dt) {
@@ -797,10 +1109,7 @@ function updateAirPrey(p, dt) {
     if (p.x < p.lake.x0 + 5) p.vx = Math.abs(p.vx);
     if (p.x > p.lake.x0 + p.lake.w - 5) p.vx = -Math.abs(p.vx);
     p.x += p.vx * dt;
-    if (sensed(p, dt)) {
-      p.sitting = false; p.alertT = 0.8; p.spookT = 2;
-      p.vx = (Math.sign(p.x - bird.x) || 1) * s.speed * 0.6; p.vy = 8;
-    }
+    if (sensed(p, dt)) duckTakeOff(p);
     return;
   }
   if (p.kind === 'pigeon' || p.kind === 'duck') {
@@ -851,15 +1160,28 @@ function sweptDist(px, palt, dt) {
   return Math.hypot(px - (x0 + sx * u), palt - (a0 + sa * u));
 }
 
-function award(entry, pts, msg) {
-  const e = { ...entry, pts, t: state.time };
-  state.score += pts;
+function award(entry, priced, msg) {
+  const e = { ...entry, pts: priced.value, tags: priced.tags, t: state.time };
+  state.score += e.pts;
   state.catches++;
   state.catchLog.push(e);
   state.lastCatch = e;
-  state.msg = `${msg} +${pts}`;
+  state.msg = `${msg} +$${e.pts}`;
+  state.msgTags = priced.tags.join('  ·  ');
+  state.msgTagsFor = state.msg;
   state.msgT = 2;
   return e;
+}
+
+// Extra starlings grabbed while a flock combo is open add a flat amount (×3 for turtle hits) and keep the chain alive
+function addStarling(p, turtleHit) {
+  const e = p.combo.entry;
+  const extra = Math.round(STARLING_EXTRA * (turtleHit ? 3 : 1) * chainMult());
+  e.count++; e.pts += extra; e.t = state.time;
+  state.score += extra;
+  state.chainT = state.time;
+  state.msg = `Starlings ×${e.count}! +$${e.pts}`;
+  state.msgT = 2;
 }
 
 function checkCatch(p, dt) {
@@ -871,7 +1193,7 @@ function checkCatch(p, dt) {
     if (p.hidden) return;
     const dx = p.x - bird.x, prevDx = dx + (bird.vx - (p.curVx || 0)) * dt;
     const crossed = Math.sign(dx) !== Math.sign(prevDx);
-    if (!((Math.abs(dx) < s.radius || crossed) && bird.alt < s.catchAlt)) return;
+    if (!((Math.abs(dx) < s.radius || crossed) && bird.alt < s.catchAlt * STATS.catchAlt[tier('talons')])) return;
     if (p.kind === 'turtle') {
       p.gone = true;
       bird.carrying = { kind: 'turtle' };
@@ -881,11 +1203,11 @@ function checkCatch(p, dt) {
     }
     p.gone = true;
     const minAlt = Math.min(bird.passMin, bird.alt);
-    const pts = Math.round(s.pts + bird.speed * 10 + (1 - minAlt / s.catchAlt) * 200);
-    award({ kind: p.kind, speed: bird.speed, minAlt }, pts, `${s.name}!`);
+    const priced = priceCatch(p.kind, { speed: bird.speed, minAlt, catchAlt: s.catchAlt, unseen: !p.noticed });
+    award({ kind: p.kind, speed: bird.speed, minAlt }, priced, `${s.name}!`);
     return;
   }
-  const r = Math.max(3, 22 / cam.zoom);
+  const r = airCatchRadius();
   const strike = bird.speed;
   // Points reward the angle of attack: relative speed between you and the prey
   const closing = Math.hypot(bird.vx - p.vx - windX(p.alt), bird.vy - p.vy);
@@ -907,8 +1229,8 @@ function checkCatch(p, dt) {
       tgt.caught = true;
       if (!p.combo) {
         // First catch scatters the flock for good; grab more before they're gone
-        const pts = Math.round(s.pts + closing * 10);
-        const entry = award({ kind: 'flock', speed: bird.speed, rel: closing, alt: tgt.alt, air: true, count: 1 }, pts, 'Starling! Grab more');
+        const priced = priceCatch('flock', { speed: bird.speed, unseen: !p.noticed });
+        const entry = award({ kind: 'flock', speed: bird.speed, rel: closing, alt: tgt.alt, air: true, count: 1 }, priced, 'Starling! Grab more');
         p.combo = { entry, t: STARLING_COMBO_TIME };
         p.scatterT = Infinity;
         for (const m of p.members) {
@@ -916,17 +1238,13 @@ function checkCatch(p, dt) {
           m.svx = Math.cos(a) * 20; m.svy = Math.sin(a) * 20;
         }
       } else {
-        const e = p.combo.entry;
-        e.count++; e.pts += STARLING_EXTRA_PTS; e.t = state.time;
-        state.score += STARLING_EXTRA_PTS;
-        state.msg = `Starlings ×${e.count}! +${e.pts}`;
-        state.msgT = 2;
+        addStarling(p, false);
       }
       return;
     }
     p.gone = true;
-    const pts = Math.round(s.pts + closing * 10);
-    award({ kind: p.kind, speed: bird.speed, rel: closing, alt: tgt.alt, air: true }, pts, `${s.name}!`);
+    const priced = priceCatch(p.kind, { speed: bird.speed, unseen: !p.noticed });
+    award({ kind: p.kind, speed: bird.speed, rel: closing, alt: tgt.alt, air: true }, priced, `${s.name}!`);
     return;
   }
 }
@@ -937,7 +1255,7 @@ function throwVelocity(aimed) {
   if (aimed) {
     const ax = cam.x + (mouse.x - W / 2) / cam.zoom - bird.x;
     const ay = cam.alt + (H / 2 - mouse.y) / cam.zoomY - bird.alt;
-    const d = Math.hypot(ax, ay) || 1, push = Math.min(TURTLE_THROW, d * 0.2);
+    const d = Math.hypot(ax, ay) || 1, push = Math.min(throwPush(), d * 0.2 * throwPush() / TURTLE_THROW);
     vx += (ax / d) * push; vy += (ay / d) * push;
   }
   return { vx, vy };
@@ -953,11 +1271,12 @@ function nearestFallingTurtle() {
   return best;
 }
 
-function grabFallingTurtle(target) {
+function grabFallingTurtle(target, dt = 0) {
   if (!target || target.done || bird.carrying || state.over || paused) return;
   if (target.alt <= 0) return;
-  const d = Math.hypot(target.x - bird.x, target.alt - bird.alt);
-  if (d > TALON_GRAB_RANGE) return;
+  // Swept along this frame's path (like air strikes) so a fast pass can't skip over the small grab range
+  const d = dt ? sweptDist(target.x, target.alt, dt) : Math.hypot(target.x - bird.x, target.alt - bird.alt);
+  if (d > talonGrabRange()) return;
   target.done = true;
   bird.carrying = { kind: 'turtle', midair: true };
   state.msg = 'Talon grab! Turtle in hand';
@@ -966,9 +1285,15 @@ function grabFallingTurtle(target) {
 
 function dropTurtle(aimed = false) {
   if (!bird.carrying || state.over || paused) return;
+  if (bird.carrying.kind === 'gun') {
+    // Space with the rifle: let it fall; it can be picked up again
+    state.guns.push({ x: bird.x, alt: bird.alt, vx: bird.vx, vy: bird.vy, ammo: bird.carrying.ammo, noGrab: GUN_REGRAB_T });
+    bird.carrying = null;
+    return;
+  }
   const { vx, vy } = throwVelocity(aimed);
-  const target = aimed ? pickThrowTarget(simulateThrow(bird.x, bird.alt, vx, vy)) : null;
-  state.fallers.push({ x: bird.x, alt: bird.alt, vx, vy, dropAlt: bird.alt, spin: 0, target });
+  const target = aimed && turtleHoming() > 0 ? pickThrowTarget(simulateThrow(bird.x, bird.alt, vx, vy)) : null;
+  state.fallers.push({ x: bird.x, alt: bird.alt, vx, vy, dropAlt: bird.alt, spin: 0, target, homing: turtleHoming(), bounces: AIM_STATS.bounces[aimTier()] });
   bird.carrying = null;
 }
 
@@ -986,7 +1311,7 @@ function simulateThrow(x, alt, vx, vy) {
 
 // Animal the throw is lined up on: a ground animal near the landing spot, or a flier close to the arc
 function pickThrowTarget(path) {
-  const end = path[path.length - 1];
+  const end = path[path.length - 1], LA = THROW_LOCK_AIR * (lockScale() || 1), LG = THROW_LOCK_GROUND * (lockScale() || 1);
   let best = null, bestD = Infinity;
   for (const p of prey) {
     if (p.gone || p.hidden || p.spent || p.kind === 'turtle') continue;
@@ -994,25 +1319,279 @@ function pickThrowTarget(path) {
     if (SPECIES[p.kind].air && !p.sitting) {
       d = Infinity;
       for (let i = 0; i < path.length; i += 3) d = Math.min(d, Math.hypot(path[i].x - p.x, path[i].alt - p.alt));
-      if (d > THROW_LOCK_AIR) continue;
+      if (d > LA) continue;
     } else {
       d = Math.abs(p.x - end.x);
-      if (d > THROW_LOCK_GROUND) continue;
+      if (d > LG) continue;
     }
     if (d < bestD) { bestD = d; best = p; }
   }
   for (const r of state.rivals) {
-    if (r.gone || r.mode === 'return' && Math.hypot(r.x - end.x, r.alt - end.alt) > THROW_LOCK_AIR) continue;
+    if (r.gone || r.mode === 'return' && Math.hypot(r.x - end.x, r.alt - end.alt) > LA) continue;
     const d = Math.hypot(r.x - end.x, r.alt - end.alt);
-    const match = d < THROW_LOCK_AIR && (Math.abs(r.x - end.x) < THROW_LOCK_GROUND || d < THROW_LOCK_AIR);
+    const match = d < LA && (Math.abs(r.x - end.x) < LG || d < LA);
     if (!match) continue;
     if (d < bestD) { bestD = d; best = { kind: 'buzzard', x: r.x, alt: r.alt, target: r }; }
+  }
+  for (const t of hazardTargets()) {
+    let d;
+    if (t.air) {
+      d = Infinity;
+      for (let i = 0; i < path.length; i += 3) d = Math.min(d, Math.hypot(path[i].x - t.x, path[i].alt - t.alt));
+      if (d > LA) continue;
+    } else {
+      d = Math.abs(t.x - end.x);
+      if (d > LG) continue;
+    }
+    if (d < bestD) { bestD = d; best = t; }
   }
   return best;
 }
 
 function isBuzzardTarget(target) {
   return target && target.kind === 'buzzard';
+}
+
+// Predators as turtle targets (wrappers like the buzzard lock). Cats can't be locked: hitting one is pure skill
+function hazardTargets() {
+  const hz = state.hazards, out = [];
+  for (const h of hz.hunters) if (!h.gone) out.push({ kind: 'hunter', x: h.x, alt: 0, air: false, target: h });
+  if (hz.hawk && !hz.hawk.gone) out.push({ kind: 'hawk', x: hz.hawk.x, alt: hz.hawk.alt, air: true, target: hz.hawk });
+  return out;
+}
+
+// Body boxes: a hunter stands ~1.9 m tall, a cat ~0.6 m; the goshawk is hit like a buzzard
+function hazardHitBy(f) {
+  const hz = state.hazards;
+  for (const c of hz.cats) {
+    if (!c.gone && Math.abs(c.x - f.x) < 2.5 && f.alt < c.alt + 1.2 && f.alt > c.alt - 0.8) return { kind: 'cat', obj: c };
+  }
+  for (const h of hz.hunters) {
+    if (!h.gone && Math.abs(h.x - f.x) < 2 && f.alt < 2.2) return { kind: 'hunter', obj: h };
+  }
+  const h = hz.hawk;
+  if (h && !h.gone && Math.hypot(h.x - f.x, h.alt - f.alt) < 5) return { kind: 'hawk', obj: h };
+  return null;
+}
+
+function hazardStrike(f, kind, obj) {
+  const impact = Math.hypot(f.vx, f.vy);
+  const unseen = kind === 'cat' && obj.mode === 'hide';
+  // Marked stolen so a buzzard can't steal it back
+  award({ kind: 'turtle', speed: impact, turtleHit: true, targetKind: kind, stolen: true },
+        priceCatch(kind, { impact, unseen }), `TURTLE STRIKE! ${HAZARD_NAME[kind]}`);
+  state.msgT = 2.5;
+  removeHazard(kind, obj);
+  f.struck = true;
+  f.hitBuzzard = true;
+  ricochet(f);
+}
+
+// Takes a predator out for the day; a downed hunter drops his rifle
+function removeHazard(kind, obj) {
+  obj.gone = true;
+  const hz = state.hazards;
+  if (kind === 'hawk') { hz.hawk = null; hz.hawkT = Math.max(hz.hawkT, 45); }
+  if (kind === 'hunter') {
+    state.guns.push({ x: obj.x, alt: 1.5, vx: (Math.random() - 0.5) * 6, vy: 5, ammo: gunStat('ammo') });
+    state.msg += '  ·  He dropped his rifle!';
+  }
+  for (let i = 0; i < 20; i++) particles.push({
+    x: obj.x, alt: Math.max(0.5, obj.alt || 1), vx: (Math.random() - 0.5) * 18, vy: Math.random() * 12, life: 1.1
+  });
+}
+
+// ---------- Hunter's rifle ----------
+// Pick it up off the ground like a turtle; right-click fires. The base rifle shoots along your heading (hold to see
+// the line, release to fire). Free aim holds your course while right-click is down so the cursor can aim anywhere.
+// Auto-fire sprays while held; the Bazooka fires rockets that take everything in a blast. The bang spooks animals.
+const GUN_GRAB_R = 3, GUN_GRAB_ALT = 3;
+const GUN_AIR_GRAB = 0.8;   // fraction of the air-catch radius for snatching a falling rifle
+const GUN_REGRAB_T = 0.6;   // a rifle you just let go can't be re-caught for this long
+const AUTO_FIRE_DT = 0.11, ROCKET_SPEED = 110, ROCKET_BLAST = 14, ROCKET_FUSE = 3.5;
+const gunStat = k => GUN_STATS[k][tier('rifle')];
+const gunFreeAim = () => tier('rifle') >= 2;
+const gunAuto = () => tier('rifle') === 4;
+const gunBazooka = () => tier('rifle') >= 5;
+const gunAimHeld = () => !!(bird.carrying && bird.carrying.kind === 'gun' && mouse.aiming && mouse.throwHeld);
+
+function aimWorld() {
+  return { x: cam.x + (mouse.x - W / 2) / cam.zoom, alt: cam.alt + (H / 2 - mouse.y) / cam.zoomY };
+}
+
+function gunRay() {
+  if (!gunFreeAim()) return { ux: Math.cos(bird.angle), uy: Math.sin(bird.angle) };
+  const a = aimWorld(), dx = a.x - bird.x, dy = a.alt - bird.alt, l = Math.hypot(dx, dy) || 1;
+  return { ux: dx / l, uy: dy / l };
+}
+
+// Everything a bullet or blast can take: [x, alt, hit radius, hit]
+function gunTargets() {
+  const out = [], w = gunStat('width');
+  for (const p of prey) {
+    if (p.gone || p.hidden || p.spent) continue;
+    if (p.kind === 'flock') { for (const m of p.members) if (!m.caught) out.push([m.x, m.alt, w, { type: 'prey', p, m }]); continue; }
+    const alt = SPECIES[p.kind].air && !p.sitting ? p.alt : (p.alt ?? 0) + 0.4;
+    out.push([p.x, alt, w, { type: 'prey', p, m: p }]);
+  }
+  for (const r of state.rivals) if (!r.gone) out.push([r.x, r.alt, w + 1, { type: 'buzzard', r }]);
+  const hz = state.hazards;
+  for (const c of hz.cats) if (!c.gone) out.push([c.x, c.alt + 0.4, w, { type: 'hz', kind: 'cat', obj: c }]);
+  for (const h of hz.hunters) if (!h.gone) out.push([h.x, 1, w, { type: 'hz', kind: 'hunter', obj: h }]);
+  if (hz.hawk) out.push([hz.hawk.x, hz.hawk.alt, w + 1, { type: 'hz', kind: 'hawk', obj: hz.hawk }]);
+  // Turtles in flight: skeet
+  for (const f of state.fallers) if (!f.done && f.alt > 0.5) out.push([f.x, f.alt, w, { type: 'skeet', f }]);
+  return out;
+}
+
+// First thing along the ray (t = metres along it); stops at the ground
+function gunTrace(ux, uy) {
+  let best = null, bestT = gunStat('range');
+  if (uy < 0) bestT = Math.min(bestT, Math.max(0, bird.alt) / -uy);
+  for (const [x, alt, r, hit] of gunTargets()) {
+    const px = x - bird.x, py = alt - bird.alt, t = px * ux + py * uy;
+    if (t > 0 && t < bestT + r && Math.abs(px * uy - py * ux) < r) { bestT = Math.min(bestT, t); best = hit; }
+  }
+  return { t: bestT, hit: best };
+}
+
+// Award whatever a bullet or rocket took out
+function takeShot(hit, verb) {
+  if (hit.type === 'prey') {
+    const { p, m } = hit, s = SPECIES[p.kind];
+    if (p.kind === 'flock') {
+      m.caught = true; p.scatterT = 3; p.alertT = 0.8;
+      award({ kind: 'flock', speed: bird.speed, air: true, count: 1, shot: true }, priceCatch('flock', {}), `${verb} Starling`);
+    } else {
+      p.gone = true;
+      const what = p.kind === 'turtle' ? 'Turtle — shell cracked' : s.name;
+      award({ kind: p.kind, speed: bird.speed, air: s.air, shot: true }, priceCatch(p.kind, { unseen: !p.noticed }), `${verb} ${what}`);
+    }
+  } else if (hit.type === 'buzzard') {
+    const r = hit.r;
+    r.gone = true; r.mode = 'leave';
+    award({ kind: 'turtle', speed: bird.speed, targetKind: 'buzzard', stolen: true, shot: true }, priceCatch('buzzard', {}), `${verb} Buzzard`);
+  } else if (hit.type === 'skeet') {
+    hit.f.done = true;
+    award({ kind: 'turtle', speed: bird.speed, shot: true }, priceCatch('turtle', { skeet: true }), `${verb} Skeet shot — shell shattered`);
+  } else {
+    award({ kind: 'turtle', speed: bird.speed, targetKind: hit.kind, stolen: true, shot: true }, priceCatch(hit.kind, {}), `${verb} ${HAZARD_NAME[hit.kind]}`);
+    removeHazard(hit.kind, hit.obj);
+  }
+}
+
+// The bang sends everything nearby running
+function gunSpook(x, r) {
+  for (const p of prey) {
+    if (p.gone || p.spent || Math.abs(p.x - x) > r) continue;
+    if (SPECIES[p.kind].air) spookAir(p); else { p.fleeing = true; p.alertT = 1; }
+  }
+}
+
+function fireGun() {
+  const g = bird.carrying;
+  if (!g || g.kind !== 'gun' || g.ammo <= 0 || state.over || paused || bird.inWater) return;
+  const { ux, uy } = gunRay();
+  g.ammo--; g.flash = 0.09;
+  state.rings.push({ x: bird.x, alt: bird.alt, t: 0, r: 60, kind: 'shot' });
+  if (gunBazooka()) {
+    state.rockets.push({ x: bird.x + ux * 2, alt: bird.alt + uy * 2, vx: ux * ROCKET_SPEED, vy: uy * ROCKET_SPEED, t: 0 });
+    gunSpook(bird.x, 60);
+  } else {
+    const { t, hit } = gunTrace(ux, uy);
+    state.tracers.push({ x0: bird.x, a0: bird.alt, x1: bird.x + ux * t, a1: bird.alt + uy * t, t: 0.25 });
+    if (hit) {
+      takeShot(hit, 'BANG!');
+      const hx = bird.x + ux * t, ha = Math.max(0.5, bird.alt + uy * t);
+      for (let i = 0; i < 16; i++) particles.push({ x: hx, alt: ha, vx: (Math.random() - 0.5) * 16, vy: Math.random() * 10, life: 1 });
+    } else if (!gunAuto()) {
+      state.msg = 'BANG! Missed'; state.msgT = 1.5; state.msgTags = null;
+    }
+    gunSpook(bird.x, gunStat('spook'));
+  }
+  if (g.ammo <= 0) {
+    bird.carrying = null;
+    mouse.aiming = false; mouse.throwHeld = false; mouse.steer = null;
+    state.toast = { text: gunBazooka() ? 'Last rocket away — launcher dropped' : 'Out of ammo — gun dropped', t: 2.5 };
+  }
+}
+
+function explodeRocket(r) {
+  r.done = true;
+  const bx = r.x, ba = Math.max(0, r.alt);
+  state.blasts.push({ x: bx, alt: ba, t: 0 });
+  state.rings.push({ x: bx, alt: ba, t: 0, r: 120, kind: 'shot' });
+  cam.shake = Math.max(cam.shake, 8);
+  let n = 0, total = 0;
+  for (const [x, alt, rad, hit] of gunTargets()) {
+    if (Math.hypot(x - bx, alt - ba) > ROCKET_BLAST + rad) continue;
+    const before = state.score;
+    takeShot(hit, 'BOOM!');
+    n++; total += state.score - before;
+  }
+  if (n > 1) { state.msg = `BOOM! ${n} at once +$${total}`; state.msgTags = null; state.msgT = 2.5; }
+  else if (!n) { state.msg = 'BOOM! Missed'; state.msgTags = null; state.msgT = 1.5; }
+  for (let i = 0; i < 40; i++) particles.push({
+    x: bx, alt: ba + 1, vx: (Math.random() - 0.5) * 40, vy: Math.random() * 26, life: 1.2
+  });
+  gunSpook(bx, gunStat('spook'));
+}
+
+function updateRockets(dt) {
+  for (const r of state.rockets) {
+    r.t += dt;
+    // Sub-steps so a fast rocket can't skip past a small target
+    const steps = Math.ceil(Math.hypot(r.vx, r.vy) * dt / 1.5);
+    for (let k = 0; k < steps && !r.done; k++) {
+      const h = dt / steps;
+      r.vy -= G * 0.15 * h; r.x += r.vx * h; r.alt += r.vy * h;
+      let boom = r.alt <= 0 || r.t > ROCKET_FUSE;
+      if (!boom) for (const [x, alt, rad] of gunTargets()) if (Math.hypot(x - r.x, alt - r.alt) < rad + 1) { boom = true; break; }
+      if (boom) explodeRocket(r);
+    }
+    if (!r.done && Math.random() < 0.6) particles.push({ x: r.x, alt: r.alt, vx: -r.vx * 0.05, vy: -r.vy * 0.05 + 1, life: 0.5 });
+  }
+  state.rockets = state.rockets.filter(r => !r.done);
+  for (const b of state.blasts) b.t += dt;
+  state.blasts = state.blasts.filter(b => b.t < 0.6);
+}
+
+function updateGuns(dt) {
+  for (const t of state.tracers) t.t -= dt;
+  state.tracers = state.tracers.filter(t => t.t > 0);
+  updateRockets(dt);
+  const held = bird.carrying;
+  if (held && held.kind === 'gun') {
+    held.flash = Math.max(0, (held.flash || 0) - dt);
+    held.cool = (held.cool || 0) - dt;
+    if (gunAuto() && gunAimHeld() && held.cool <= 0) { held.cool = AUTO_FIRE_DT; fireGun(); }
+  }
+  for (const g of state.guns) {
+    g.noGrab = Math.max(0, (g.noGrab || 0) - dt);
+    if (g.alt > 0) {
+      g.vy -= G * dt; g.x += g.vx * dt; g.alt += g.vy * dt;
+      if (g.alt <= 0) { g.alt = 0; g.vx = 0; g.vy = 0; }
+    }
+  }
+  if (!bird.carrying && !state.over && !bird.inWater) {
+    for (const g of state.guns) {
+      if (g.noGrab > 0) continue;
+      // In flight: snatch it like air prey; on the ground: swoop low over it
+      const inAir = g.alt > 0.5;
+      if (inAir ? sweptDist(g.x, g.alt, dt) > airCatchRadius() * GUN_AIR_GRAB
+        : g.alt > 0 || Math.abs(g.x - bird.x) > GUN_GRAB_R || bird.alt > GUN_GRAB_ALT * STATS.catchAlt[tier('talons')]) continue;
+      g.gone = true;
+      bird.carrying = { kind: 'gun', ammo: g.ammo };
+      const how = gunAuto() ? 'hold right-click to spray' : gunFreeAim() ? 'hold right-click to aim anywhere, release to fire' : 'hold right-click, release to fire straight ahead';
+      state.msg = `${inAir ? 'Caught it mid-air' : 'Got the ' + (gunBazooka() ? 'bazooka' : 'rifle')}! ${how}`; state.msgT = 3; state.msgTags = null;
+      if (!progress.gunFound) {
+        progress.gunFound = true; saveProgress();
+        state.toast = { text: 'New upgrade unlocked in the Roost: Rifle', t: 4 };
+      }
+      break;
+    }
+  }
+  state.guns = state.guns.filter(g => !g.gone && Math.abs(g.x - bird.x) < 3000);
 }
 
 // Ground impact speed of something released here, from energy: horizontal speed plus vertical gained over the fall
@@ -1033,42 +1612,68 @@ function turtleStrike(p, member, f) {
   if (f.hitBuzzard || f.done || !member || member.caught) return;
   const s = SPECIES[p.kind];
   const impact = Math.hypot(f.vx, f.vy);
-  const pts = Math.round(s.pts * 2 + 500 + impact * 5);
+  const unseen = !p.noticed;
   if (p.kind === 'flock') {
     member.caught = true;
     p.scatterT = 3;
     p.alertT = 0.8;
     if (!p.combo) {
-      const entry = award({ kind: 'flock', speed: impact, rel: impact, alt: member.alt ?? 0, air: true, count: 1, turtleHit: true }, pts, 'TURTLE STRIKE! Starling');
+      const priced = priceCatch('flock', { turtleHit: true, impact, unseen });
+      const entry = award({ kind: 'flock', speed: impact, rel: impact, alt: member.alt ?? 0, air: true, count: 1, turtleHit: true }, priced, 'TURTLE STRIKE! Starling');
       p.combo = { entry, t: STARLING_COMBO_TIME };
     } else {
-      const e = p.combo.entry;
-      e.count++; e.pts += pts; e.t = state.time;
-      state.score += pts;
-      state.msg = `Starlings ×${e.count}! +${e.pts}`;
-      state.msgT = 2;
+      addStarling(p, true);
     }
   } else {
     p.gone = true;
     f.struck = true;
-    award({ kind: p.kind, speed: impact, turtleHit: true, air: s.air, alt: member.alt ?? 0, minAlt: 0 }, pts, `TURTLE STRIKE! ${s.name}`);
+    const priced = priceCatch(p.kind, { turtleHit: true, impact, unseen });
+    award({ kind: p.kind, speed: impact, turtleHit: true, air: s.air, alt: member.alt ?? 0, minAlt: 0 }, priced, `TURTLE STRIKE! ${s.name}`);
   }
   unlockAchievement('aeschylus', 'Aeschylus — hit prey with a falling turtle');
   for (let i = 0; i < 20; i++) particles.push({
     x: member.x ?? p.x, alt: Math.max(0.5, member.alt ?? 0.5), vx: (Math.random() - 0.5) * 16, vy: Math.random() * 10, life: 1
   });
-  if (p.kind !== 'flock') f.struck = true;
+  if (p.kind !== 'flock') { f.struck = true; ricochet(f); }
+}
+
+// Ricochet: after a hit, hop on a ballistic arc toward the nearest other target and keep homing
+function ricochet(f) {
+  if (!(f.bounces > 0)) return;
+  let best = null, bestD = RICOCHET_RANGE;
+  for (const p of prey) {
+    if (p.gone || p.hidden || p.spent || p.kind === 'turtle' || p.kind === 'flock') continue;
+    const alt = SPECIES[p.kind].air && !p.sitting ? p.alt : 0;
+    const d = Math.hypot(p.x - f.x, alt - f.alt);
+    if (d < bestD) { bestD = d; best = { t: p, x: p.x, alt }; }
+  }
+  for (const r of state.rivals) {
+    if (r.gone) continue;
+    const d = Math.hypot(r.x - f.x, r.alt - f.alt);
+    if (d < bestD) { bestD = d; best = { t: { kind: 'buzzard', x: r.x, alt: r.alt, target: r }, x: r.x, alt: r.alt }; }
+  }
+  for (const t of hazardTargets()) {
+    const d = Math.hypot(t.x - f.x, t.alt - f.alt);
+    if (d < bestD) { bestD = d; best = { t, x: t.x, alt: t.alt }; }
+  }
+  if (!best) return;
+  const T = Math.max(0.7, Math.min(1.8, bestD / 30));
+  f.vx = (best.x - f.x) / T;
+  f.vy = (best.alt - f.alt + 0.5 * G * T * T) / T;
+  f.alt = Math.max(f.alt, 0.5);
+  f.target = best.t;
+  f.bounces--;
+  f.struck = false; f.hitBuzzard = false; f.done = false;
+  f.ricochets = (f.ricochets || 0) + 1;
+  f.bounced = true;
+  state.msg += f.ricochets > 1 ? '  ·  DOUBLE RICOCHET!' : '  ·  Ricochet!';
 }
 
 function buzzardStrike(f, r) {
   const impact = Math.hypot(f.vx, f.vy);
-  const pts = Math.round(400 + impact * 6);
-  const e = { kind: 'turtle', speed: impact, turtleHit: true, buzzard: true, targetKind: 'buzzard', pts, t: state.time, stolen: true };
-  state.score += pts;
-  state.catches++;
-  state.lastCatch = e;
-  state.catchLog.push(e);
-  state.msg = `TURTLE STRIKE! Buzzard +${pts}`;
+  // Marked stolen so a buzzard can't steal it back
+  const e = award({ kind: 'turtle', speed: impact, turtleHit: true, buzzard: true, targetKind: 'buzzard', stolen: true },
+                  priceCatch('buzzard', { impact }), 'TURTLE STRIKE! Buzzard');
   state.msgT = 2.5;
   r.gone = true;
   r.mode = 'leave'; r.t = 4; r.alertT = 0.8;
@@ -1077,20 +1682,25 @@ function buzzardStrike(f, r) {
   for (let i = 0; i < 20; i++) particles.push({
     x: r.x, alt: r.alt, vx: (Math.random() - 0.5) * 18, vy: Math.random() * 12, life: 1.1
   });
+  ricochet(f);
 }
 
 function updateFallers(dt) {
   for (const f of state.fallers) {
+    f.bounced = false;
     f.vy -= G * dt;
     f.vx += (windX(f.alt) - f.vx) * Math.min(1, dt * 0.2);
     // Gentle homing on the animal that was locked when thrown
-    if (f.target && !f.target.gone && !f.target.hidden) {
-      const tAlt = SPECIES[f.target.kind].air ? f.target.alt : 0;
+    if (f.target && !f.target.gone && !f.target.hidden && !(f.target.target && f.target.target.gone)) {
+      // Buzzard / predator locks hold a reference to the live object; follow it rather than the snapshot
+      const tg = f.target.target || f.target;
+      const tAlt = f.target.kind === 'buzzard' || f.target.air || SPECIES[f.target.kind]?.air ? tg.alt : 0;
       const drop = f.alt - tAlt;
       if (drop > 0) {
         const tRem = (f.vy + Math.sqrt(f.vy * f.vy + 2 * G * drop)) / G;
-        const wantVx = (f.target.x - f.x) / Math.max(0.3, tRem) + (f.target.vx || 0) * 0.5;
-        f.vx += Math.max(-TURTLE_HOMING, Math.min(TURTLE_HOMING, (wantVx - f.vx) * 2)) * dt;
+        const wantVx = (tg.x - f.x) / Math.max(0.3, tRem) + (tg.vx || 0) * 0.5;
+        const hm = f.homing || TURTLE_HOMING;
+        f.vx += Math.max(-hm, Math.min(hm, (wantVx - f.vx) * 2)) * dt;
       }
     }
     f.x += f.vx * dt; f.alt += f.vy * dt; f.spin += dt * 5;
@@ -1102,6 +1712,8 @@ function updateFallers(dt) {
           break;
         }
       }
+      const hit = hazardHitBy(f);
+      if (hit) hazardStrike(f, hit.kind, hit.obj);
       for (const p of prey) {
         if (p.gone || p.spent || !SPECIES[p.kind].air) continue;
         const targets = p.kind === 'flock' ? p.members.filter(m => !m.caught) : [p];
@@ -1109,8 +1721,8 @@ function updateFallers(dt) {
       }
     }
     if (f.alt > 0) continue;
-    f.done = true;
     if (f.struck || f.hitBuzzard) {
+      f.done = true;
       const t = makeGround(f.x, 'turtle');
       t.failCD = 2;
       prey.push(t);
@@ -1120,10 +1732,14 @@ function updateFallers(dt) {
       if (p.gone || p.hidden || SPECIES[p.kind].air || p.kind === 'turtle') continue;
       if (Math.abs(p.x - f.x) < 3) turtleStrike(p, p, f);
     }
+    f.done = true;
+    // A ground hit that ricocheted is airborne again
+    if (f.bounced) { f.bounced = false; f.done = false; continue; }
+    // A ricochet that missed its next target just lands; the turtle walks off
+    if (f.ricochets) { const t = makeGround(f.x, 'turtle'); t.failCD = 2; prey.push(t); continue; }
     const impact = Math.hypot(f.vx, f.vy);
     if (impact >= SHELL_CRACK_SPEED) {
-      const pts = Math.round(SPECIES.turtle.pts + (impact - SHELL_CRACK_SPEED) * 20);
-      award({ kind: 'turtle', speed: impact, drop: f.dropAlt }, pts, 'Shell cracked!');
+      award({ kind: 'turtle', speed: impact, drop: f.dropAlt }, priceCatch('turtle', { impact }), 'Shell cracked!');
       for (let i = 0; i < 25; i++) particles.push({
         x: f.x, alt: 0.5, vx: (Math.random() - 0.5) * 20, vy: Math.random() * 12, life: 1.2
       });
@@ -1143,7 +1759,7 @@ function updateFallers(dt) {
 // ---------- Rivals ----------
 // Buzzards circle some thermals. Make a kill or carry a turtle nearby and they give chase;
 // if one reaches you it steals the turtle or your most recent catch. Outfly them in a dive.
-const RIVAL_SPEED = 24, STEAL_WINDOW = 6;
+const RIVAL_SPEED = 24;
 
 function updateRivals(dt) {
   const i0 = Math.floor(bird.x / THERMAL_SPACING);
@@ -1157,23 +1773,26 @@ function updateRivals(dt) {
   for (const r of state.rivals) {
     r.t -= dt; r.flapT += dt * 6;
     const dx = bird.x - r.x, dy = bird.alt - r.alt, d = Math.hypot(dx, dy);
-    const fresh = state.lastCatch && state.time - state.lastCatch.t < STEAL_WINDOW && !state.lastCatch.stolen;
-    if (r.mode === 'circle' && d < 150 && (bird.carrying || fresh)) {
+    const fresh = state.lastCatch && state.time - state.lastCatch.t < stealWindow() && !state.lastCatch.stolen && !state.lastCatch.eyas;
+    if (r.mode === 'circle' && d < STATS.notice[tier('stealth')] && (bird.carrying || fresh)) {
       r.mode = 'chase'; r.t = 7; r.alertT = 0.8;
       state.msg = 'A buzzard is after your prize!'; state.msgT = 2;
     }
     if (r.mode === 'chase') {
-      r.vx = dx / (d || 1) * RIVAL_SPEED; r.vy = dy / (d || 1) * RIVAL_SPEED;
+      const cs = rivalChaseSpeed();
+      r.vx = dx / (d || 1) * cs; r.vy = dy / (d || 1) * cs;
       if (d < 4) {
         if (bird.carrying) {
+          state.msg = `A buzzard snatched your ${bird.carrying.kind === 'gun' ? 'rifle' : 'turtle'}!`;
           bird.carrying = null;
-          state.msg = 'A buzzard snatched your turtle!';
         } else if (fresh) {
           const e = state.lastCatch;
           e.stolen = true;
           state.score -= e.pts;
           state.catchLog.splice(state.catchLog.indexOf(e), 1);
-          state.msg = `A buzzard stole your ${SPECIES[e.kind].name}! -${e.pts}`;
+          state.steals.push(e);
+          breakChain();
+          state.msg = `A buzzard stole your ${SPECIES[e.kind].name}! -$${e.pts}`;
         }
         state.msgT = 2.5;
         r.mode = 'leave'; r.t = 5;
@@ -1198,6 +1817,432 @@ function updateRivals(dt) {
   state.rivals = state.rivals.filter(r => !r.gone && Math.abs(r.x - bird.x) < 3000);
 }
 
+// ---------- Hazards ----------
+// Cats hide in the grass and pounce on slow, low passes; hunters lock on to slow fliers in range; a goshawk
+// stalks you and stoops. Any of them ends the day. They appear and get sharper as the days go on.
+const danger = () => clamp((state.day - 1) / 6, 0, 1);
+const CAT_CELL = 220, CAT_REACH = 32, CAT_ALT = 18, CAT_LEAP_T = 0.45, CAT_LEAP_MAX = 40, CAT_LEAP_VY = 34, CAT_HIT = 3;
+const CAT_STALK_DIST = 120, CAT_STALK_ALT = 45, CAT_STALK_SPEED = 4;
+const HUNTER_CELL = 900, HUNTER_RANGE = 230, HUNTER_TRACK = 4, HUNTER_LOCK_DIST = 10, HUNTER_FROM_DAY = 2;
+const HUNTER_AIM_T = 0.7, HUNTER_HIT = 3, HUNTER_RELOAD = 1.5;   // s of visible aim before the shot; m from the shot line that kills; s between shots
+const HUNTER_SEE_ALT = 190, HUNTER_SNAP_LEAD = 0.4, HUNTER_SNAP_SPREAD = 7;   // snap shots: share of the full lead, ± m scatter
+const HAWK_SPEED = 70, HAWK_TURN = 2.4, HAWK_HIT = 3, HAWK_FROM_DAY = 3;
+const HAWK_STOOP_DIST = 110, HAWK_COMMIT = 45, HAWK_ACCEL = 35;
+// The aim trails the bird by speed / HUNTER_TRACK, so a slow flier gets a quick clean lock; anyone else in
+// range still draws a snap shot after hunterSnapTime of watching
+const hunterLockTime = () => 1.2 - 0.4 * danger();
+const hunterSnapTime = () => 1.5 - 0.5 * danger();
+const rivalChaseSpeed = () => 30 + 6 * danger();
+
+function newHazards() {
+  return { cats: [], hunters: [], hawk: null, hawkT: 40 + Math.random() * 20, seen: new Set() };
+}
+
+function killBird(reason, msg) {
+  if (state.over || bird.invulnT > 0) return;
+  if (state.feathers > 0) {
+    // Lucky Feather: shrug off one fatal attack, a cloud of feathers and a moment of grace
+    state.feathers--; bird.invulnT = LUCKY_INVULN;
+    if (reason === 'hawk' && state.hazards.hawk) { state.hazards.hawk.mode = 'leave'; state.hazards.hawk.commit = false; }
+    state.msg = `Lucky Feather! ${msg.replace(/!$/, '')} — but you slipped away`; state.msgT = 2.5; state.msgTags = null;
+    for (let i = 0; i < 30; i++) state.featherFx.push({ x: bird.x, alt: bird.alt, vx: (Math.random() - 0.5) * 16, vy: (Math.random() - 0.3) * 10, rot: Math.random() * 6, life: 1.6 });
+    return;
+  }
+  bird.carrying = null;
+  state.crash = { t: 0, smoke: [], killer: reason };
+  endDay(reason);
+  state.msg = `${msg} — the hunt is over for today`;
+  for (let i = 0; i < 35; i++) particles.push({
+    x: bird.x, alt: bird.alt, vx: (Math.random() - 0.5) * 24, vy: Math.random() * 14, life: 1.4
+  });
+}
+
+// ---------- Whacky upgrades: Eyases, Screech, Lucky Feather ----------
+// Eyases (young hawks) fly in loose formation behind you, peel off after prey near you and bring you a share
+const EYAS = { count: [0, 1, 2, 3], speed: [0, 32, 35, 39], range: [0, 160, 190, 220] };
+const EYAS_SHARE = 0.5, EYAS_TURN = 3.2, EYAS_CHASE_T = 8, EYAS_REST_T = 4, EYAS_CATCH_R = 2.2, EYAS_SPOOK_D = 30, EYAS_DROP = 160;
+// Screech (E): everything within the radius freezes in fear for a moment
+const SCREECH = { radius: [0, 60, 100], freeze: [0, 2, 3], cool: [0, 15, 10] };
+// Lucky Feather: survive this many fatal attacks (cat / hunter / goshawk) per day
+const LUCKY = [0, 1, 2], LUCKY_INVULN = 2.5;
+
+function spawnEyases() {
+  state.eyases = [];
+  for (let i = 0; i < EYAS.count[tier('eyas')]; i++) {
+    state.eyases.push({ i, x: bird.x - 15 - 10 * i, alt: bird.alt + 6 + 5 * i, vx: 12, vy: 0, mode: 'follow', t: 2 + i * 1.5,
+                        flapT: i * 2, target: null, carry: null });
+  }
+}
+
+function eyasCanTake(p) {
+  if (p.gone || p.spent || p.hidden || p.kind === 'flock' || p.kind === 'turtle') return false;
+  const s = SPECIES[p.kind];
+  return s.air !== 'water';
+}
+const preyAlt = p => SPECIES[p.kind].air && !p.sitting ? p.alt : (p.alt ?? 0) + 0.4;
+
+function updateEyases(dt) {
+  const t = tier('eyas');
+  if (!t || !state.eyases) return;
+  const dir = Math.sign(bird.vx) || 1, bsp = Math.hypot(bird.vx, bird.vy);
+  for (const e of state.eyases) {
+    e.t -= dt; e.flapT += dt * 11;
+    if (e.mode === 'chase') {
+      const p = e.target;
+      if (!p || p.gone || p.spent || p.hidden || e.t <= 0) {
+        e.mode = 'follow'; e.t = 2; e.target = null;
+      } else {
+        const pa = preyAlt(p), air = SPECIES[p.kind].air && !p.sitting;
+        const pvx = p.curVx ?? p.vx ?? 0, pvy = air ? (p.vy || 0) : 0;
+        const d = Math.hypot(p.x - e.x, pa - e.alt), sp = EYAS.speed[t];
+        const lead = Math.min(1.5, d / sp);
+        const want = Math.atan2(pa + pvy * lead - e.alt, p.x + pvx * lead - e.x), cur = Math.atan2(e.vy, e.vx);
+        const ang = cur + clamp(wrapAngle(want - cur), -EYAS_TURN * dt, EYAS_TURN * dt);
+        const cs = Math.min(sp, Math.hypot(e.vx, e.vy) + 25 * dt);
+        e.vx = Math.cos(ang) * cs; e.vy = Math.sin(ang) * cs;
+        if (d < EYAS_SPOOK_D && !p.eyasSpooked) {
+          p.eyasSpooked = true; p.noticed = true;
+          if (p.sitting) duckTakeOff(p); else if (SPECIES[p.kind].air) spookAir(p); else p.alertT = 0.8;
+        }
+        // Swept: closest approach of this step's flight segment to the prey
+        const sx = e.vx * dt, sy = e.vy * dt, rx = p.x - e.x, ry = pa - e.alt;
+        const k = clamp((rx * sx + ry * sy) / (sx * sx + sy * sy || 1), 0, 1);
+        if (Math.hypot(rx - sx * k, ry - sy * k) < EYAS_CATCH_R) {
+          p.gone = true;
+          const priced = priceCatch(p.kind, { share: EYAS_SHARE });
+          award({ kind: p.kind, speed: cs, air: !!SPECIES[p.kind].air, eyas: true }, priced, `Your eyas caught a ${SPECIES[p.kind].name}!`);
+          e.mode = 'follow'; e.t = EYAS_REST_T; e.carry = p.kind; e.target = null;
+          for (let i = 0; i < 8; i++) particles.push({ x: p.x, alt: pa, vx: (Math.random() - 0.5) * 8, vy: Math.random() * 6, life: 0.7 });
+        }
+      }
+    } else {
+      // Formation slot behind and above you; snap back if left far behind (e.g. after a long stoop)
+      const gx = bird.x - dir * (14 + 9 * e.i), ga = Math.max(bird.inWater ? 10 : 3, bird.alt + 5 + 4 * e.i);
+      const ex = gx - e.x, ea = ga - e.alt;
+      if (Math.hypot(ex, ea) > 400) { e.x = gx - dir * 60; e.alt = ga + 20; e.vx = bird.vx; e.vy = 0; }
+      const maxS = Math.max(EYAS.speed[t], bsp * 1.25 + 10);
+      let tvx = (bird.inWater ? 0 : bird.vx) + ex * 1.5, tvy = (bird.inWater ? 0 : bird.vy) + ea * 1.5;
+      const tl = Math.hypot(tvx, tvy);
+      if (tl > maxS) { tvx *= maxS / tl; tvy *= maxS / tl; }
+      e.vx += (tvx - e.vx) * Math.min(1, dt * 4); e.vy += (tvy - e.vy) * Math.min(1, dt * 4);
+      if (e.t <= 0) e.carry = null;
+      if (e.t <= 0 && !state.sunset) {
+        let best = null, bestD = EYAS.range[t];
+        for (const p of prey) {
+          if (!eyasCanTake(p) || state.eyases.some(o => o.target === p)) continue;
+          const dx = Math.abs(p.x - bird.x), dy = bird.alt - preyAlt(p);
+          if (dx < bestD && dy < EYAS_DROP && dy > -EYAS_DROP * 0.5) { bestD = dx; best = p; }
+        }
+        if (best) { e.mode = 'chase'; e.t = EYAS_CHASE_T; e.target = best; }
+        else e.t = 0.4;
+      }
+    }
+    e.x += e.vx * dt; e.alt = Math.max(0.5, e.alt + e.vy * dt);
+  }
+}
+
+function screech() {
+  const t = tier('screech');
+  if (!t || state.over || paused || state.screechCD > 0) return;
+  state.screechCD = SCREECH.cool[t];
+  const r = SCREECH.radius[t], f = SCREECH.freeze[t];
+  state.rings.push({ x: bird.x, alt: bird.alt, t: 0, r, kind: 'screech' });
+  let n = 0;
+  for (const p of prey) {
+    if (p.gone || p.spent || p.hidden || Math.hypot(p.x - bird.x, preyAlt(p) - bird.alt) > r) continue;
+    p.frozenT = f; p.alertT = f; n++;
+  }
+  for (const c of state.hazards.cats) if (!c.gone && c.mode !== 'leap' && Math.hypot(c.x - bird.x, c.alt - bird.alt) < r) { c.frozenT = f; n++; }
+  for (const h of state.hazards.hunters) if (!h.gone && Math.hypot(h.x - bird.x, 1.6 - bird.alt) < r) { h.frozenT = f; h.aim = 0; h.lock = 0; h.watch = 0; n++; }
+  state.msg = n ? `SCREEE! ${n} frozen in fear` : 'SCREEE!'; state.msgT = 1.2; state.msgTags = null;
+}
+
+function updateFeathers(dt) {
+  bird.invulnT = Math.max(0, (bird.invulnT || 0) - dt);
+  state.screechCD = Math.max(0, (state.screechCD || 0) - dt);
+  for (const f of state.featherFx) { f.life -= dt; f.vy -= 3 * dt; f.vx *= 0.97; f.x += f.vx * dt; f.alt += f.vy * dt; f.rot += dt * 4; }
+  state.featherFx = state.featherFx.filter(f => f.life > 0);
+}
+
+// ---------- Fishing ----------
+// Hit a lake steeply (descending faster than WATER_PLUNGE_VY) and you plunge in instead of crashing: the faster
+// the entry, the deeper you go. Water drag bleeds off the plunge quickly; after that you swim toward the cursor
+// at up to WATER_SWIM_SPEED for as long as your breath lasts, then buoyancy takes you up. Grab any fish you pass,
+// or come up under a resting duck for a big bonus (nothing sees you more than SUBMERGED_HIDE m down).
+const WATER_PLUNGE_VY = 3, WATER_DRAG = 5, WATER_BUOY = 3, WATER_SWIM_SPEED = 7, WATER_PADDLE = 14;
+const BREATH_TIME = 7, BREATHLESS_BUOY = 16, SUBMERGED_HIDE = 1, DUCK_BELOW_REACH = 2.2, DUCK_SPLASH_R = 35;
+const WATER_EXIT_SPEED = STALL_SPEED + 4, WET_TIME = 2.5, FISH_REACH = 1.6, FISH_SPOOK = 25;
+
+function makeFish(l, kind) {
+  const s = SPECIES[kind], dmax = Math.min(s.depth[1], l.depth - 0.6);
+  const d = s.depth[0] + Math.random() * (dmax - s.depth[0]);
+  return { kind, lake: l, x: l.x0 + 4 + Math.random() * (l.w - 8), alt: -d, tAlt: -d, vx: randDir() * s.speed,
+           ph: Math.random() * 10, fleeT: 0, riseT: 0, wanderT: 2 + Math.random() * 5, spooked: false };
+}
+
+function splashAt(x, l) {
+  for (let i = 0; i < 30; i++) particles.push({ x: x + (Math.random() - 0.5) * 3, alt: 0.2, vx: (Math.random() - 0.5) * 16, vy: 4 + Math.random() * 12, life: 1 });
+  for (const f of state.fish) {
+    if (f.lake.x0 !== l.x0 || Math.abs(f.x - x) > FISH_SPOOK) continue;
+    f.fleeT = 2.5; f.riseT = 0; f.spooked = true;
+    f.vx = Math.sign(f.x - x || 1) * SPECIES[f.kind].dart;
+    f.tAlt = -Math.min(SPECIES[f.kind].depth[1], l.depth - 0.6);
+  }
+  // Resting ducks on the lake take off at the splash
+  for (const p of prey) if (p.sitting && p.lake && p.lake.x0 === l.x0 && Math.abs(p.x - x) < DUCK_SPLASH_R) duckTakeOff(p);
+}
+
+function updateFish(dt) {
+  for (const f of state.fish) {
+    const s = SPECIES[f.kind], l = f.lake, floor = -(l.depth - 0.5);
+    f.ph += dt;
+    if (f.fleeT > 0) {
+      f.fleeT -= dt;
+      if (f.fleeT <= 0) f.vx = Math.sign(f.vx) * s.speed;
+    } else {
+      f.wanderT -= dt;
+      if (f.wanderT <= 0) {
+        f.wanderT = 3 + Math.random() * 6;
+        if (Math.random() < 0.3) f.vx = -f.vx;
+        // Trout now and then rise to feed just under the surface, where they're easy to see and reach
+        if (f.kind === 'trout' && Math.random() < 0.4) { f.riseT = 3 + Math.random() * 4; f.tAlt = -0.4; }
+        else f.tAlt = -(s.depth[0] + Math.random() * (Math.min(s.depth[1], l.depth - 0.6) - s.depth[0]));
+      }
+      if (f.riseT > 0 && (f.riseT -= dt) <= 0) f.wanderT = 0;
+      // A low shadow passing over sends a shallow fish down
+      if (bird.alt > 0 && bird.alt < 25 && Math.abs(bird.x + shadowOffset(bird.alt) - f.x) < 6 && f.alt > -1.5) {
+        f.riseT = 0; f.tAlt = -Math.min(s.depth[1], l.depth - 0.6); f.wanderT = 4;
+      }
+    }
+    f.x += f.vx * dt;
+    if (f.x < l.x0 + 2 || f.x > l.x0 + l.w - 2) { f.x = clamp(f.x, l.x0 + 2, l.x0 + l.w - 2); f.vx = -f.vx; }
+    f.alt += clamp(f.tAlt - f.alt, -1, 1) * dt * (f.fleeT > 0 ? 3 : 1.2);
+    f.alt = clamp(f.alt, floor, -0.3);
+    // Grab: swept from last frame so a fast plunge can't skip past a fish
+    if (bird.inWater && !bird.carrying && sweptDist(f.x, f.alt, dt) < FISH_REACH * STATS.airReach[tier('talons')]) {
+      f.gone = true;
+      const priced = priceCatch(f.kind, { speed: bird.entrySpeed, unseen: !f.spooked });
+      award({ kind: f.kind, speed: bird.entrySpeed, water: true, depth: -f.alt }, priced, `${s.name}! (${(-f.alt).toFixed(1)} m deep)`);
+    }
+  }
+  state.fish = state.fish.filter(f => !f.gone);
+}
+
+// Coming up under a duck resting on the lake: grab it from below
+function catchDuckFromBelow(l, dt) {
+  if (bird.carrying || bird.vy <= 0) return;
+  for (const p of prey) {
+    if (!p.sitting || p.gone || !p.lake || p.lake.x0 !== l.x0) continue;
+    if (sweptDist(p.x, 0, dt) > DUCK_BELOW_REACH * STATS.airReach[tier('talons')]) continue;
+    p.gone = true;
+    const priced = priceCatch(p.kind, { below: true, unseen: !p.noticed });
+    award({ kind: p.kind, speed: bird.speed, water: true, below: true }, priced, `Ambush from below! ${SPECIES[p.kind].name}`);
+    state.msgT = 2.5;
+    // The rest of the raft scatters
+    for (const q of prey) if (q.sitting && q.lake && q.lake.x0 === l.x0 && Math.abs(q.x - p.x) < DUCK_SPLASH_R) duckTakeOff(q);
+    for (let i = 0; i < 14; i++) particles.push({ x: p.x, alt: 0.4, vx: (Math.random() - 0.5) * 8, vy: 2 + Math.random() * 6, life: 0.8 });
+    return;
+  }
+}
+
+function spawnHazards() {
+  const hz = state.hazards, dg = danger();
+  const ci = Math.floor(bird.x / CAT_CELL);
+  for (let i = ci - 8; i <= ci + 8; i++) {
+    if (hz.seen.has('c' + i)) continue;
+    hz.seen.add('c' + i);
+    const x = (i + 0.2 + Math.random() * 0.6) * CAT_CELL;
+    if (Math.random() > 0.15 + 0.2 * dg || Math.abs(x) < 250 || lakeAtX(x)) continue;
+    hz.cats.push({ x, alt: 0, vx: 0, vy: 0, mode: 'hide', t: 0, dir: randDir(), alertT: 0 });
+  }
+  if (state.day >= HUNTER_FROM_DAY) {
+    const hi = Math.floor(bird.x / HUNTER_CELL);
+    for (let i = hi - 2; i <= hi + 2; i++) {
+      if (hz.seen.has('h' + i)) continue;
+      hz.seen.add('h' + i);
+      const x = (i + 0.2 + Math.random() * 0.6) * HUNTER_CELL;
+      if (Math.random() > 0.3 + 0.35 * dg || Math.abs(x) < 400 || lakeAtX(x)) continue;
+      hz.hunters.push({ x, lock: 0, reload: 0, flash: 0, ax: x, aalt: 30, tracking: false, aim: 0, tracer: 0 });
+    }
+  }
+  hz.cats = hz.cats.filter(c => !c.gone && Math.abs(c.x - bird.x) < 3000);
+  hz.hunters = hz.hunters.filter(h => !h.gone && Math.abs(h.x - bird.x) < 3000);
+}
+
+function updateCat(c, dt) {
+  c.t -= dt; c.alertT -= dt;
+  const dx = bird.x - c.x;
+  if (c.mode === 'hide') {
+    c.dir = Math.sign(dx) || c.dir;
+    // Stalk: creep through the grass toward a bird flying low nearby
+    c.stalk = Math.abs(dx) < CAT_STALK_DIST && bird.alt < CAT_STALK_ALT && Math.abs(dx) > 4;
+    if (c.stalk && !lakeAtX(c.x + Math.sign(dx) * CAT_STALK_SPEED * dt * 4)) c.x += Math.sign(dx) * CAT_STALK_SPEED * dt;
+    if (c.t <= 0 && Math.abs(dx) < CAT_REACH && bird.alt < CAT_ALT) {
+      c.mode = 'crouch'; c.t = 0.12; c.dir = Math.sign(dx) || 1; c.alertT = 0.8;
+    }
+  } else if (c.mode === 'crouch') {
+    if (c.t <= 0) {
+      // Leap at where the bird will be; the flight time scales with distance so far/high leaps still connect
+      const px = bird.x + bird.vx * CAT_LEAP_T, pa = Math.max(0, bird.alt + bird.vy * CAT_LEAP_T);
+      const T = clamp(Math.hypot(px - c.x, pa) / 30, 0.3, 0.7);
+      const tx = bird.x + bird.vx * T, ta = Math.max(0, bird.alt + bird.vy * T);
+      c.vx = clamp((tx - c.x) / T, -CAT_LEAP_MAX, CAT_LEAP_MAX);
+      c.vy = Math.min(CAT_LEAP_VY, (ta + 0.5 * G * T * T) / T);
+      c.dir = Math.sign(c.vx) || c.dir;
+      c.mode = 'leap';
+    }
+  } else if (c.mode === 'leap') {
+    c.vy -= G * dt; c.x += c.vx * dt; c.alt += c.vy * dt;
+    if (sweptDist(c.x, c.alt, dt) < CAT_HIT) killBird('cat', 'A cat pounced from the grass!');
+    if (c.alt <= 0) { c.alt = 0; c.vx = 0; c.mode = 'sit'; c.t = 1.5; }
+  } else if (c.mode === 'sit' && c.t <= 0) {
+    c.mode = 'hide'; c.t = 1;
+  }
+}
+
+// The hunter's aim trails the bird; fly slowly in range and the lock builds. Then it shoulders the rifle,
+// leads your flight and shows its line for HUNTER_AIM_T before firing: change course or die
+function updateHunter(h, dt) {
+  h.reload -= dt; h.flash -= dt; h.tracer -= dt;
+  if (h.aim) {
+    h.aim -= dt;
+    if (h.aim <= 0) fireHunter(h);
+    return;
+  }
+  const d = Math.hypot(bird.x - h.x, bird.alt - 1.6);
+  const sees = d < HUNTER_RANGE && bird.alt < HUNTER_SEE_ALT && !insideCloud(bird.x, bird.alt) && !bird.inWater;
+  if (!sees) {
+    h.tracking = false;
+    h.lock = Math.max(0, h.lock - dt);
+    h.watch = 0;
+    return;
+  }
+  if (!h.tracking) {
+    h.tracking = true;
+    h.ax = bird.x - bird.vx * 0.6; h.aalt = bird.alt - bird.vy * 0.6;
+  }
+  const k = Math.min(1, dt * HUNTER_TRACK);
+  h.ax += (bird.x - h.ax) * k; h.aalt += (bird.alt - h.aalt) * k;
+  const err = Math.hypot(bird.x - h.ax, bird.alt - h.aalt);
+  h.watch = (h.watch || 0) + dt;
+  if (h.reload > 0) return;
+  if (err < HUNTER_LOCK_DIST) h.lock += dt / hunterLockTime();
+  else h.lock = Math.max(0, h.lock - dt * 0.7);
+  if (h.lock >= 1 || h.watch >= hunterSnapTime()) {
+    // Lead the bird to where it will be when the shot goes off. A clean lock leads perfectly; a snap shot
+    // under-leads and scatters, so steady fast flight is often missed but never safe
+    const snap = h.lock < 1, lead = HUNTER_AIM_T * (snap ? HUNTER_SNAP_LEAD + 0.15 * danger() : 1);
+    const spread = snap ? HUNTER_SNAP_SPREAD : 0;
+    h.lock = 0; h.watch = 0; h.aim = HUNTER_AIM_T;
+    h.ax = bird.x + bird.vx * lead + (Math.random() - 0.5) * 2 * spread;
+    h.aalt = Math.max(0.5, bird.alt + bird.vy * lead + (Math.random() - 0.5) * 2 * spread);
+  }
+}
+
+function fireHunter(h) {
+  h.aim = 0; h.reload = HUNTER_RELOAD; h.flash = 0.15; h.tracer = 0.3;
+  state.rings.push({ x: h.x, alt: 1.6, t: 0, r: 60, kind: 'shot' });
+  // Gunfire sends nearby prey running
+  for (const p of prey) {
+    if (p.gone || p.spent || Math.abs(p.x - h.x) > 120) continue;
+    if (SPECIES[p.kind].air) spookAir(p); else { p.fleeing = true; p.alertT = 1; }
+  }
+  const ux0 = h.ax - h.x, uy0 = h.aalt - 1.6, len = Math.hypot(ux0, uy0) || 1, ux = ux0 / len, uy = uy0 / len;
+  const px = bird.x - h.x, py = bird.alt - 1.6;
+  const along = px * ux + py * uy, off = Math.abs(px * uy - py * ux);
+  if (along > 0 && off < HUNTER_HIT && !insideCloud(bird.x, bird.alt) && !bird.inWater) killBird('hunter', 'Shot by a hunter!');
+  else { state.msg = 'A shot whizzed past!'; state.msgT = 2; }
+}
+
+function spawnHawk() {
+  const side = randDir(), hz = state.hazards;
+  hz.hawk = { x: bird.x - side * 220, alt: Math.min(MAX_ALT, bird.alt + 90), vx: side * 25, vy: 0,
+              mode: 'stalk', t: 4 + Math.random() * 2, attacks: 0, flapT: 0, alertT: 0, minD: Infinity };
+  state.msg = 'A goshawk is hunting you!'; state.msgT = 2.5;
+}
+
+function updateHawk(h, dt) {
+  h.t -= dt; h.flapT += dt * 7; h.alertT -= dt;
+  const dx = bird.x - h.x, dy = bird.alt - h.alt, d = Math.hypot(dx, dy);
+  const steer = (tx, ty, speed, rate) => {
+    const len = Math.hypot(tx, ty) || 1;
+    h.vx += (tx / len * speed - h.vx) * Math.min(1, dt * rate);
+    h.vy += (ty / len * speed - h.vy) * Math.min(1, dt * rate);
+  };
+  const hidden = insideCloud(bird.x, bird.alt) || !!bird.inWater;
+  const bsp = Math.hypot(bird.vx, bird.vy);
+  if (h.mode === 'stalk') {
+    // Shadow the bird from above and behind, keeping pace however fast it flies
+    const back = -(Math.sign(bird.vx) || 1) * 40;
+    const gx = bird.x + back - h.x, gy = Math.min(MAX_ALT, bird.alt + 35) - h.alt;
+    steer(gx, gy, Math.max(32, bsp + Math.min(30, Math.hypot(gx, gy) * 0.4)), 3);
+    if (h.t <= 0 && !hidden && d < HAWK_STOOP_DIST) {
+      h.mode = 'stoop'; h.t = 5; h.minD = Infinity; h.alertT = 0.9;
+      state.msg = 'The goshawk is stooping — break away at the last moment!'; state.msgT = 2;
+      const len = d || 1, s0 = Math.max(HAWK_SPEED * 0.8, bsp + 10);
+      h.vx = dx / len * s0; h.vy = dy / len * s0;
+    }
+  } else if (h.mode === 'stoop') {
+    // Steers toward a lead point until HAWK_COMMIT m out, then commits to a straight strike line:
+    // a hard turn, dive or brake after that makes it overshoot; jinking too early just lets it re-aim
+    const top = Math.max(HAWK_SPEED + 10 * danger(), bsp + 25);
+    let sp = Math.min(top, Math.hypot(h.vx, h.vy) + dt * HAWK_ACCEL);
+    if (!h.commit) {
+      const lead = d / Math.max(1, sp - bsp * 0.3);
+      const lx = bird.x + bird.vx * lead - h.x, ly = bird.alt + bird.vy * lead - h.alt;
+      const cur = Math.atan2(h.vy, h.vx), want = Math.atan2(ly, lx);
+      const turn = (HAWK_TURN + 0.6 * danger()) * dt;
+      const ang = cur + clamp(wrapAngle(want - cur), -turn, turn);
+      h.vx = Math.cos(ang) * sp; h.vy = Math.sin(ang) * sp;
+      if (d < HAWK_COMMIT) {
+        // Commit: lock the exact intercept of your current flight line
+        h.commit = true; h.alertT = 0.6;
+        let ix = bird.x, ia = bird.alt;
+        for (let k = 0; k < 4; k++) {
+          const tt = Math.hypot(ix - h.x, ia - h.alt) / sp;
+          ix = bird.x + bird.vx * tt; ia = bird.alt + bird.vy * tt;
+        }
+        const len = Math.hypot(ix - h.x, ia - h.alt) || 1;
+        h.vx = (ix - h.x) / len * sp; h.vy = (ia - h.alt) / len * sp; h.csp = sp;
+      }
+    } else {
+      const len = Math.hypot(h.vx, h.vy) || 1;
+      h.vx = h.vx / len * h.csp; h.vy = h.vy / len * h.csp;
+    }
+    if (!hidden && (sweptDist(h.x + h.vx * dt, h.alt + h.vy * dt, dt) < HAWK_HIT || d < HAWK_HIT)) {
+      killBird('hawk', 'Taken by a goshawk!');
+      return;
+    }
+    h.minD = Math.min(h.minD, d);
+    if (h.t <= 0 || hidden || (h.minD < 40 && d > h.minD + 12)) {
+      h.mode = 'recover'; h.t = 2; h.attacks++; h.commit = false;
+      if (!hidden) { state.msg = 'The goshawk missed!'; state.msgT = 1.5; }
+    }
+  } else if (h.mode === 'recover') {
+    steer(h.vx, Math.abs(h.vx) * 0.6 + 10, 30, 1.5);
+    if (h.t <= 0) {
+      if (h.attacks < 3 + Math.round(danger())) { h.mode = 'stalk'; h.t = 1.5 + Math.random() * 1.5; }
+      else { h.mode = 'leave'; state.msg = 'The goshawk gave up'; state.msgT = 1.5; }
+    }
+  } else {
+    steer(-dx, 40, 30, 1);
+    if (d > 700) state.hazards.hawk = null;
+  }
+  h.x += h.vx * dt; h.alt = Math.max(3, h.alt + h.vy * dt);
+}
+
+function updateHazards(dt) {
+  const hz = state.hazards;
+  spawnHazards();
+  for (const c of hz.cats) { if (c.frozenT > 0) { c.frozenT -= dt; continue; } updateCat(c, dt); if (state.over) return; }
+  for (const h of hz.hunters) { if (h.frozenT > 0) { h.frozenT -= dt; continue; } updateHunter(h, dt); if (state.over) return; }
+  if (state.day >= HAWK_FROM_DAY && !hz.hawk && !state.sunset) {
+    hz.hawkT -= dt;
+    if (hz.hawkT <= 0) { spawnHawk(); hz.hawkT = 60 - 30 * danger() + Math.random() * 20; }
+  }
+  if (hz.hawk) updateHawk(hz.hawk, dt);
+}
+
 function wrapAngle(a) {
   while (a > Math.PI) a -= 2 * Math.PI;
   while (a < -Math.PI) a += 2 * Math.PI;
@@ -1207,6 +2252,13 @@ function wrapAngle(a) {
 // ---------- Coordinate helpers ----------
 const toScreenX = x => W / 2 + (x - cam.x) * cam.zoom;
 const toScreenY = alt => H / 2 - (alt - cam.alt) * cam.zoomY;
+
+// Freeze the bird's current screen position; the camera then zooms/reframes around it (see the camera update)
+function holdCamera() {
+  const sx = clamp(toScreenX(bird.x), W * 0.15, W * 0.85);
+  const sy = clamp(toScreenY(bird.alt), VIEW_MARGIN, H - groundPx() - 10);
+  cam.pin = { sx, sy, k: 1, hold: 0.6 };
+}
 
 // ---------- Update ----------
 function updateParticles(dt) {
@@ -1231,19 +2283,24 @@ function updateCrash(dt) {
 }
 
 function update(dt) {
-  if (paused) return;
+  if (paused || screen !== 'hunt') return;
   if (state.over) {
+    state.overT += dt;
     if (state.crash) updateCrash(dt);
+    // Linger on the crash or sunset for a moment, then show the day's recap
+    if (state.overT > (state.crash ? CRASH_REVEAL_DELAY + 2 : 2.5)) showRecap();
     return;
   }
 
   // Steering: turn toward the mouse (relative to the lens when the bird is above the screen)
   const { x: bx, y: by } = birdAnchor();
   // Convert screen direction to world direction (vertical axis may be compressed)
-  const target = Math.atan2((by - mouse.y) / cam.zoomY, (mouse.x - bx) / cam.zoom); // up = positive
+  const hold = gunAimHeld() && mouse.steer;
+  const smx = hold ? bx + mouse.steer.dx : mouse.x, smy = hold ? by + mouse.steer.dy : mouse.y;
+  const target = Math.atan2((by - smy) / cam.zoomY, (smx - bx) / cam.zoom); // up = positive
   // Effort 0..1: how far the mouse is toward the screen edge in that direction, so every heading
   // (including straight down) can reach full effort, not just the far corners
-  const mdx = mouse.x - bx, mdy = mouse.y - by;
+  const mdx = smx - bx, mdy = smy - by;
   const mouseDist = Math.hypot(mdx, mdy);
   let edgeDist = Infinity;
   if (mouseDist > 0) {
@@ -1259,12 +2316,12 @@ function update(dt) {
   const pointingDown = bird.angle < -0.35;
   // Mouse well above the bird = flap automatically (with hysteresis so shallow climbs can glide);
   // holding the button always brakes
-  const braking = mouse.down && !bird.brakeLocked;
+  const braking = mouse.down && !bird.brakeLocked && !bird.inWater;
   if (braking) {
-    bird.brakeE = Math.max(0, bird.brakeE - dt / BRAKE_DURATION);
+    bird.brakeE = Math.max(0, bird.brakeE - dt / brakeDuration());
     if (bird.brakeE === 0) bird.brakeLocked = true;
   } else {
-    bird.brakeE = Math.min(1, bird.brakeE + dt / BRAKE_RECHARGE);
+    bird.brakeE = Math.min(1, bird.brakeE + dt / brakeRecharge());
     if (bird.brakeLocked && bird.brakeE >= BRAKE_UNLOCK) bird.brakeLocked = false;
   }
   const flapOn = bird.mode === 'FLAP' ? 0.3 : 0.45;
@@ -1280,11 +2337,33 @@ function update(dt) {
   if (braking) turnRate *= 4;
   // Ground effect: easier to level out when close to the ground
   if (bird.alt < 25 && bird.angle < 0) turnRate *= 2;
+  turnRate *= STATS.agility[tier('agility')];
 
-  let dragK = braking ? BRAKE_DRAG : DRAG * (1.6 - tuck * 0.8);
+  let dragK = braking ? BRAKE_DRAG : dragBase() * (1.6 - tuck * 0.8);
   if (bird.carrying) dragK *= 1.3;
   let sink = 0;
-  if (bird.alt > MAX_ALT) {
+  if (bird.inWater) {
+    // Underwater: heavy drag bleeds off the plunge, then you paddle toward the cursor while your breath lasts;
+    // buoyancy is mild until you run out of air, then it carries you up
+    let wvx = Math.cos(bird.angle) * bird.speed, wvy = Math.sin(bird.angle) * bird.speed;
+    bird.breath = Math.max(0, (bird.breath ?? BREATH_TIME) - dt);
+    const sp0 = Math.hypot(wvx, wvy);
+    if (sp0 > WATER_SWIM_SPEED) {
+      const k = Math.max(WATER_SWIM_SPEED / sp0, Math.exp(-WATER_DRAG * dt));
+      wvx *= k; wvy *= k;
+    }
+    if (bird.breath > 0) {
+      const sw = WATER_SWIM_SPEED * effort, dvx = Math.cos(target) * sw - wvx, dvy = Math.sin(target) * sw - wvy;
+      const dv = Math.hypot(dvx, dvy), a = Math.min(dv, WATER_PADDLE * dt);
+      if (dv > 0) { wvx += dvx / dv * a; wvy += dvy / dv * a; }
+      wvy += WATER_BUOY * dt;
+    } else {
+      wvx *= Math.exp(-2 * dt);
+      wvy += BREATHLESS_BUOY * dt;
+    }
+    bird.speed = Math.max(0.3, Math.hypot(wvx, wvy));
+    bird.angle = Math.atan2(wvy, wvx);
+  } else if (bird.alt > MAX_ALT) {
     // Above the ceiling: free flight under gravity, and the bird turns to face its velocity
     let bvx = Math.cos(bird.angle) * bird.speed, bvy = Math.sin(bird.angle) * bird.speed;
     bvy -= G * dt;
@@ -1302,10 +2381,10 @@ function update(dt) {
     const thinAir = Math.max(0, Math.min(1, (MAX_ALT - bird.alt) / 50));
     // Climbing steeply: weaker net thrust and a lower speed ceiling
     const climb = Math.max(0, Math.sin(bird.angle));
-    const flapMax = FLAP_MAX_SPEED - 20 * climb;
+    const flapMax = flapMaxSpeed() - 20 * climb;
     if (flapping && bird.speed < flapMax) {
       const taper = Math.min(1, (flapMax - bird.speed) / 5);
-      accel += FLAP_THRUST * (1 - 0.4 * climb) * (0.4 + 0.6 * effort) * thinAir * taper * (bird.carrying ? 0.6 : 1);
+      accel += flapThrust() * (1 - 0.4 * climb) * (0.4 + 0.6 * effort) * thinAir * taper * (bird.carrying ? 0.6 : 1) * (bird.wetT > 0 ? 0.6 : 1);
     }
     bird.speed = Math.max(2, bird.speed + accel * dt);
 
@@ -1318,11 +2397,12 @@ function update(dt) {
   const vx = Math.cos(bird.angle) * bird.speed;
   const vy = Math.sin(bird.angle) * bird.speed - sink;
   updateWind(dt);
-  const gvx = vx + windX(bird.alt), gvy = vy + updraft(bird.x, bird.alt);
+  const gvx = vx + (bird.inWater ? 0 : windX(bird.alt)), gvy = vy + (bird.inWater ? 0 : updraft(bird.x, bird.alt));
   bird.x += gvx * dt;
   bird.alt += gvy * dt;
 
-  bird.mode = braking ? 'BRAKE' : diving ? 'DIVE' : flapping ? 'FLAP' : bird.speed < STALL_SPEED ? 'STALL' : 'GLIDE';
+  bird.mode = bird.inWater ? 'UNDERWATER' : braking ? 'BRAKE' : diving ? 'DIVE' : flapping ? 'FLAP' : bird.speed < STALL_SPEED ? 'STALL' : 'GLIDE';
+  if (bird.wetT > 0) bird.wetT -= dt;
   updateHearingRange(dt);
   const prevBeat = Math.floor(bird.flapT / (Math.PI * 2));
   bird.flapT += dt * (flapping ? 14 : 0);
@@ -1340,10 +2420,34 @@ function update(dt) {
     particles.push({ x: bird.x, alt: bird.alt, vx: -vx * 0.1, vy: -vy * 0.1, life: 0.6 });
   }
 
-  // Ground contact
-  if (bird.alt <= 0) {
+  // Water: plunge in when coming down steeply, float back up and burst out
+  const lake = bird.inWater || (bird.alt <= 0 && -bird.vy > WATER_PLUNGE_VY ? lakeAtX(bird.x) : null);
+  if (lake) {
+    if (!bird.inWater) {
+      bird.inWater = lake; bird.entrySpeed = bird.speed; bird.breath = BREATH_TIME;
+      splashAt(bird.x, lake);
+      cam.shake = 0;
+    }
+    bird.x = clamp(bird.x, lake.x0 + 0.5, lake.x0 + lake.w - 0.5);
+    if (bird.alt < -(lake.depth - 0.4)) {
+      // Lake bed: stop going down
+      bird.alt = -(lake.depth - 0.4);
+      const wvx = Math.cos(bird.angle) * bird.speed, wvy = Math.max(0, Math.sin(bird.angle) * bird.speed);
+      bird.speed = Math.max(0.3, Math.hypot(wvx, wvy)); bird.angle = Math.atan2(wvy, wvx);
+    }
+    if (bird.alt > -1.5) catchDuckFromBelow(lake, dt);
+    if (bird.alt >= 0) {
+      bird.inWater = null;
+      bird.alt = 0.1;
+      bird.speed = Math.max(bird.speed, WATER_EXIT_SPEED);
+      bird.angle = Math.cos(bird.angle) >= 0 ? 0.5 : Math.PI - 0.5;
+      bird.wetT = WET_TIME;
+      for (let i = 0; i < 18; i++) particles.push({ x: bird.x, alt: 0.3, vx: (Math.random() - 0.5) * 10, vy: 2 + Math.random() * 8, life: 0.8 });
+    }
+  }
+  // Ground contact (a shallow touch on a lake just skims, like the ground)
+  if (!bird.inWater && bird.alt <= 0) {
     if (-bird.vy > SAFE_VSPEED) {
-      state.over = true;
       state.crash = {
         t: 0,
         smoke: Array.from({ length: 18 }, () => {
@@ -1353,7 +2457,8 @@ function update(dt) {
                    radius: 2 + Math.random() * 4, life, maxLife: life };
         })
       };
-      state.msg = `CRASHED at ${(bird.speed * 3.6).toFixed(0)} km/h — click to retry`;
+      endDay('crash');
+      state.msg = `CRASHED at ${(bird.speed * 3.6).toFixed(0)} km/h — the hunt is over for today`;
       for (let i = 0; i < 40; i++) particles.push({
         x: bird.x, alt: 0, vx: (Math.random() - 0.5) * 30, vy: Math.random() * 20, life: 1.5
       });
@@ -1365,6 +2470,22 @@ function update(dt) {
   }
 
   state.time += dt;
+  // Day clock: warn at dusk; at sunset let any falling turtles land, then end the day
+  const hour = huntHour();
+  if (!state.duskWarned && hour >= DUSK_WARN_HOUR) {
+    state.duskWarned = true;
+    state.msg = 'The sun is setting — 30 minutes of hunting left'; state.msgT = 3;
+  }
+  if (!state.sunset && hour >= DAY_END_HOUR) {
+    state.sunset = true;
+    bird.carrying = null;
+    state.msg = 'Sunset — the hunt is over'; state.msgT = 3;
+  }
+  if (state.sunset && !state.fallers.length) {
+    endDay('sunset');
+    state.msg = 'Sunset — the hunt is over';
+    return;
+  }
   state.fog += ((insideCloud(bird.x, bird.alt) ? 1 : 0) - state.fog) * Math.min(1, dt * 3);
   // Lowest altitude in the current low pass; resets once you climb away
   bird.passMin = bird.alt > 30 ? Infinity : Math.min(bird.passMin, bird.alt);
@@ -1379,17 +2500,33 @@ function update(dt) {
 
   // Prey
   for (const p of prey) {
+    if (p.frozenT > 0) {
+      // Screeched: frozen in place (fliers just flutter along slowly); can still be caught
+      p.frozenT -= dt;
+      if (SPECIES[p.kind].air && !p.sitting) p.x += (p.vx || 0) * 0.15 * dt;
+      p.curVx = 0;
+      if (!bird.carrying && !bird.inWater && !p.gone) checkCatch(p, dt);
+      continue;
+    }
     if (SPECIES[p.kind].air) updateAirPrey(p, dt); else updateGroundPrey(p, dt);
+    updateTurn(p, dt);
+    p.flyT = SPECIES[p.kind].air && !p.sitting ? (p.flyT ?? 0) + dt : 0;
     if (SENSES[p.kind]) updateLook(p, dt);
     p.alertT -= dt;
-    if (!bird.carrying && !p.gone) checkCatch(p, dt);
+    if (!bird.carrying && !bird.inWater && !p.gone) checkCatch(p, dt);
   }
   if (!bird.carrying && mouse.aiming && mouse.talonTarget) {
-    grabFallingTurtle(mouse.talonTarget);
+    grabFallingTurtle(mouse.talonTarget, dt);
   }
   updateFallers(dt);
+  updateGuns(dt);
+  updateFish(dt);
+  updateEyases(dt);
+  updateFeathers(dt);
   updateWeather(dt);
   updateRivals(dt);
+  updateHazards(dt);
+  if (state.over) return;
   spawnPreyAhead();
 
   // Particles
@@ -1399,62 +2536,92 @@ function update(dt) {
   state.msgT -= dt;
   if (state.toast) state.toast.t -= dt;
 
-  // Camera: ground pinned near the bottom; zoom tighter when low/slow, capped at the ZOOM_CAP_ALT view.
-  // Above that, the vertical axis compresses so the bird and ground both stay on screen.
-  const usable = H - groundPx() - VIEW_MARGIN;
-  const capZoom = usable / (ZOOM_CAP_ALT + 15);
-  const fitZoom = usable / Math.min(bird.alt * 1.15 + 10, MAX_ALT + 15);
-  const speedZoom = 120 / (1 + bird.speed / 10);
-  const targetZoom = Math.max(capZoom, Math.min(speedZoom, fitZoom));
-  cam.gz += (targetZoom - cam.gz) * Math.min(1, dt * 1.5);
-  cam.gz = Math.max(capZoom, Math.min(cam.gz, fitZoom));
-  const gzY = Math.min(cam.gz, fitZoom);
-  const leadX = Math.max(-W * 0.3, Math.min(W * 0.3, bird.vx * CAMERA_LEAD * cam.gz)) / cam.gz;
-  let zoom = cam.gz, zoomY = gzY, camX = bird.x + leadX, camAlt = (H / 2 - groundPx()) / gzY;
+  // Camera: centred on the bird with a small lead along its velocity. The view height grows with speed and
+  // altitude (CAMERA_VIEW), so it isn't tied to keeping the ground on screen.
+  const viewH = clamp(CAMERA_VIEW.base + CAMERA_VIEW.perSpeed * bird.speed + CAMERA_VIEW.perAlt * bird.alt,
+                      CAMERA_VIEW.base, CAMERA_VIEW.max);
+  const baseZoom = groundFitZoom(H / viewH);
+  if (!Number.isFinite(cam.gz)) cam.gz = baseZoom;
+  cam.gz += (baseZoom - cam.gz) * Math.min(1, dt * 1.5);
+  const lead = (v, span) => clamp(v / 50, -1, 1) * span * 0.12 / cam.gz;
+  let zoom = cam.gz, zoomY = cam.gz;
+  let camX = bird.x + lead(bird.vx, W), camAlt = bird.alt + lead(bird.vy, H);
+  // Soft ground framing: pull the view down so the ground sits on the bottom band, as long as the bird stays
+  // at least GROUND_FRAME.top from the top of the screen; blended at GROUND_FRAME.stick (not a hard rule).
+  // Fades out once the ground is too far below to bring into view.
+  const floorAlt = (H / 2 - groundPx()) / zoomY, maxShift = H * (0.5 - GROUND_FRAME.top) / zoomY;
+  const groundAlt = Math.max(floorAlt, bird.alt - maxShift);
+  const reach = clamp(GROUND_FRAME.fade - (camAlt - floorAlt) / maxShift, 0, 1);
+  camAlt = lerp(camAlt, Math.min(camAlt, groundAlt), GROUND_FRAME.stick * reach);
 
-  // Air chase: frame the bird and nearby flying targets, even if the ground leaves the screen.
-  // Several close birds are blended by closeness so the framing doesn't jump between them.
-  let tgt = null, td = AIR_FOCUS_DIST, wSum = 0, wx = 0, walt = 0, spread = 0;
-  const near = [];
-  for (const p of prey) {
-    if (!SPECIES[p.kind].air || p.gone || p.spent || p.sitting) continue;
-    const d = Math.hypot(p.x - bird.x, p.alt - bird.alt);
-    if (d >= AIR_FOCUS_DIST) continue;
-    if (d < td) { td = d; tgt = p; }
-    const w = 1 - d / AIR_FOCUS_DIST;
-    wSum += w; wx += p.x * w; walt += p.alt * w;
-    near.push(p);
+  // Air chase: frame the bird and ONE locked flying target. Only birds that have been airborne for a moment
+  // and are roughly ahead of you qualify, and the lock is kept until lost, so flocks of ducks (or ducks
+  // taking off) don't yank the framing around.
+  const distTo = p => Math.hypot(p.x - bird.x, p.alt - bird.alt);
+  const aheadCos = p => {
+    const d = distTo(p), v = Math.max(1, bird.speed);
+    return d < 1 ? 1 : ((p.x - bird.x) * bird.vx + (p.alt - bird.alt) * bird.vy) / (d * v);
+  };
+  const airOk = p => p && SPECIES[p.kind].air && !p.gone && !p.spent && !p.sitting && (p.flyT ?? 0) > CHASE_MIN_FLY;
+  const prevLock = cam.lock;
+  let lock = airOk(prevLock) && distTo(prevLock) < AIR_FOCUS_DIST * 1.2 && aheadCos(prevLock) > -0.2 ? prevLock : null;
+  if (!lock) {
+    let bd = AIR_FOCUS_DIST;
+    for (const p of prey) {
+      if (!airOk(p) || aheadCos(p) < 0.6) continue;
+      const d = distTo(p);
+      if (d < bd) { bd = d; lock = p; }
+    }
   }
-  const want = tgt && bird.alt <= MAX_ALT ? Math.min(1, (AIR_FOCUS_DIST - td) / 30) : 0;
-  // Ease in quickly, but let go slowly so losing a target doesn't snap the zoom out
-  cam.focus += (want - cam.focus) * Math.min(1, dt * (want > cam.focus ? 2 : 0.6));
-  cam.tgt = want > 0 ? tgt : null;
-  if (wSum > 0) {
-    const cx = wx / wSum, calt = walt / wSum;
-    const mx = (bird.x + cx) / 2, malt = (bird.alt + calt) / 2;
-    spread = Math.hypot(bird.x - mx, bird.alt - malt);
-    for (const p of near) spread = Math.max(spread, Math.hypot(p.x - mx, p.alt - malt));
+  cam.lock = lock;
+  // Losing the target (usually a catch) would reframe the shot; pin the bird on screen instead
+  if (prevLock && lock !== prevLock && cam.focus > 0.1) holdCamera();
+  const td = lock ? distTo(lock) : Infinity;
+  const want = lock ? Math.min(1, (AIR_FOCUS_DIST - td) / 30) : 0;
+  cam.focus += (want - cam.focus) * Math.min(1, dt * (want > cam.focus ? 1.5 : 1));
+  cam.tgt = want > 0 ? lock : null;
+  if (lock) {
+    // Frame closer to the bird than the target so the falcon stays near the centre
+    const ox = (lock.x - bird.x) * 0.35, oalt = (lock.alt - bird.alt) * 0.35;
+    const spread = td * 0.65 + (lock.kind === 'flock' ? 15 : 0);
     const k = Math.min(1, dt * 3);
-    if (!cam.ft) cam.ft = { x: mx, alt: malt, r: spread };
-    cam.ft.x += (mx - cam.ft.x) * k; cam.ft.alt += (malt - cam.ft.alt) * k; cam.ft.r += (spread - cam.ft.r) * k;
+    if (!cam.ft) cam.ft = { ox, oalt, r: spread };
+    cam.ft.ox += (ox - cam.ft.ox) * k; cam.ft.oalt += (oalt - cam.ft.oalt) * k; cam.ft.r += (spread - cam.ft.r) * k;
   }
   if (cam.focus > 0.001 && cam.ft) {
-    const az = Math.min(15, (Math.min(W, H) * 0.15) / Math.max(cam.ft.r * 2, 6));
+    const az = Math.min(CHASE_ZOOM_MAX * baseZoom, 10, (Math.min(W, H) * 0.15) / Math.max(cam.ft.r * 2, 6));
     const f = cam.focus;
-    zoom = lerp(zoom, az, f); zoomY = lerp(zoomY, az, f);
-    camX = lerp(camX, cam.ft.x, f);
-    camAlt = lerp(camAlt, cam.ft.alt, f);
+    zoom = lerp(zoom, Math.max(zoom, az), f); zoomY = zoom;
+    camX = lerp(camX, bird.x + cam.ft.ox, f);
+    camAlt = lerp(camAlt, bird.alt + cam.ft.oalt, f);
   }
-  // Near the ground, the ground always stays in frame (blends in below 80 m, fully by 40 m)
-  const keepGround = Math.max(0, Math.min(1, (80 - bird.alt) / 40));
-  if (keepGround > 0) {
-    zoom = lerp(zoom, Math.min(zoom, fitZoom), keepGround);
-    zoomY = lerp(zoomY, Math.min(zoomY, fitZoom), keepGround);
-    camAlt = lerp(camAlt, Math.min(camAlt, (H / 2 - groundPx()) / zoomY), keepGround);
+  // Framing is smoothed as an offset from the bird, so the bird's own motion never lags on screen
+  if (!Number.isFinite(cam.ox)) { cam.ox = camX - bird.x; cam.oa = camAlt - bird.alt; }
+  const ks = Math.min(1, dt * 3);
+  cam.ox += (camX - bird.x - cam.ox) * ks;
+  cam.oa += (camAlt - bird.alt - cam.oa) * ks;
+  let cx = bird.x + cam.ox, ca = bird.alt + cam.oa;
+  // Camera pin: keep the bird at the same screen spot (zooming around it) so the mouse still points the
+  // same way; after a short hold, ease back to the normal framing over ~2 s
+  if (cam.pin) {
+    const pin = cam.pin;
+    pin.hold -= dt;
+    if (pin.hold <= 0) pin.k -= dt * 0.4;
+    if (pin.k <= 0) cam.pin = null;
+    else {
+      const pinK = pin.k * pin.k * (3 - 2 * pin.k);
+      cx = lerp(cx, bird.x - (pin.sx - W / 2) / zoom, pinK);
+      ca = lerp(ca, bird.alt - (H / 2 - pin.sy) / zoomY, pinK);
+    }
   }
-  cam.zoom = zoom; cam.zoomY = zoomY; cam.alt = camAlt;
-  cam.x += (camX - cam.x) * Math.min(1, dt * 3);
-  cam.shake = Math.max(0, (bird.speed - 50) / 45) * 4 + (braking ? 3 : 0);
+  // Never show more underground than the ground band at the bottom (or, over a lake, its full depth),
+  // nor more than a sliver above the ceiling
+  const wl = bird.alt < 60 && lakeAtX(bird.x);
+  const floorPx = wl ? Math.max(groundPx(), (wl.depth + 1) * zoomY) : groundPx();
+  cam.floorPx = Number.isFinite(cam.floorPx) ? cam.floorPx + (floorPx - cam.floorPx) * Math.min(1, dt * 2) : floorPx;
+  ca = Math.max(ca, (H / 2 - cam.floorPx) / zoomY);
+  ca = Math.min(ca, MAX_ALT + CEILING_MARGIN - H / 2 / zoomY);
+  cam.zoom = zoom; cam.zoomY = zoomY; cam.alt = ca; cam.x = cx;  cam.shake = Math.max(0, (bird.speed - 50) / 45) * 4 + (braking ? 3 : 0);
 }
 
 // ---------- Draw ----------
@@ -1489,8 +2656,9 @@ function drawSenseCone(p, angle, half, range, fill, stroke) {
   const fullCircle = half >= Math.PI;
 
   if (fullCircle) {
+    const radiusY = Math.max(2, Math.abs(toScreenY(eyeAlt(p) + range) - sy));
     ctx.beginPath();
-    ctx.arc(sx, sy, radius, 0, Math.PI * 2);
+    ctx.ellipse(sx, sy, radius, radiusY, 0, 0, Math.PI * 2);
     ctx.closePath();
     ctx.fillStyle = fill; ctx.fill();
     return;
@@ -1609,11 +2777,11 @@ function drawBackground() {
     }
   }
 
-  // Parallax hills
+  // Parallax hills: a distant layer scrolling at a fixed screen rate, so zooming doesn't slide them
   ctx.fillStyle = rgb(mixRGB([40, 50, 70], [143, 169, 184], d));
   ctx.beginPath(); ctx.moveTo(0, H);
   for (let sx = 0; sx <= W; sx += 20) {
-    const wx = (sx + cam.x * cam.zoom * 0.2) / 200;
+    const wx = (sx - W / 2 + cam.x * HILL_SCROLL) / 200;
     ctx.lineTo(sx, groundY - 80 - Math.sin(wx) * 40 - Math.sin(wx * 2.3) * 20);
   }
   ctx.lineTo(W, H); ctx.fill();
@@ -1687,6 +2855,23 @@ function drawBackground() {
     wg.addColorStop(1, rgb(mixRGB([15, 25, 45], [40, 90, 140], d)));
     ctx.fillStyle = wg;
     ctx.fillRect(x0, groundY - 1, x1 - x0, H - groundY + 1);
+    // Lake bed
+    const bedY = toScreenY(-l.depth);
+    if (bedY < H) { ctx.fillStyle = rgb(mixRGB([40, 34, 22], [104, 88, 58], d)); ctx.fillRect(x0, bedY, x1 - x0, H - bedY); }
+    // Fish: the deeper, the fainter; feeding trout dimple the surface
+    for (const f of state.fish) {
+      if (f.lake.x0 !== l.x0) continue;
+      const fx = toScreenX(f.x);
+      if (fx < -30 || fx > W + 30) continue;
+      ctx.globalAlpha = clamp(1 - (-f.alt) / (l.depth + 1), 0.12, 0.9) * (0.4 + 0.6 * d);
+      drawFish(fx, toScreenY(f.alt), f, animalScaleFor(f.kind) * Math.max(0.6, Math.min(1.6, cam.zoom / 8)));
+      ctx.globalAlpha = 1;
+      if (f.alt > -0.8 && Math.sin(f.ph * 2.5) > 0.6) {
+        ctx.strokeStyle = 'rgba(255,255,255,0.6)'; ctx.lineWidth = 1;
+        const r = 4 + (Math.sin(f.ph * 2.5) - 0.6) * 20;
+        ctx.beginPath(); ctx.ellipse(fx, groundY + 1, r, r * 0.25, 0, 0, Math.PI * 2); ctx.stroke();
+      }
+    }
     ctx.fillStyle = '#7a6a4a';
     ctx.fillRect(x0 - 3, groundY - 1, 3, 6); ctx.fillRect(x1, groundY - 1, 3, 6);
     ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.lineWidth = 1;
@@ -1698,7 +2883,7 @@ function drawBackground() {
   }
 
   // Bird's shadow, cast away from the sun; spreads and fades with height
-  if (!state.over && d > 0.15 && bird.alt < SHADOW_VISIBLE_ALT) {
+  if (!state.over && d > 0.15 && bird.alt >= 0 && bird.alt < SHADOW_VISIBLE_ALT) {
     const fade = (1 - bird.alt / SHADOW_VISIBLE_ALT) * Math.min(1, d * 1.5);
     const sx = toScreenX(bird.x + shadowOffset(bird.alt));
     const w = 16 * (1 + bird.alt / 40), h = 4 + bird.alt / 20;
@@ -1762,7 +2947,7 @@ function niceStep(minMetres) {
   return 500;
 }
 
-const facing = p => ((p.face ?? p.vx) < 0 ? -1 : 1);
+const facing = p => ((p.turn ?? p.face ?? p.vx) < 0 ? -1 : 1);
 
 function drawLeporid(x, y, p, s, body, earH) {
   const hop = Math.abs(Math.sin(p.hopT * 6)) * 4;
@@ -1870,6 +3055,24 @@ function drawStarling(x, y, flap, s, dir) {
 }
 
 // y is the ground line for ground species, the body centre for flying ones
+function drawFish(x, y, f, s) {
+  const pike = f.kind === 'pike', L = pike ? 11 : 7, Hh = pike ? 2 : 2.4;
+  const wag = Math.sin((f.ph || 0) * (f.fleeT > 0 ? 18 : 6)) * 0.35;
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.scale((f.vx < 0 ? -1 : 1) * s, s);
+  ctx.fillStyle = pike ? '#5d6b3a' : '#8a9a8c';
+  ctx.beginPath(); ctx.moveTo(-L + 1, 0); ctx.lineTo(-L - 4, -3 + wag * 4); ctx.lineTo(-L - 4, 3 + wag * 4); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(0, 0, L, Hh, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = pike ? '#c9c79a' : '#e0b0b0';
+  ctx.beginPath(); ctx.ellipse(0, Hh * 0.45, L * 0.75, Hh * 0.35, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = pike ? 'rgba(220,220,150,0.7)' : 'rgba(40,40,40,0.6)';
+  for (let i = 0; i < 4; i++) ctx.fillRect(-L * 0.6 + i * L * 0.35, -Hh * 0.6, pike ? 1 : 0.8, pike ? Hh : 0.8);
+  ctx.fillStyle = '#111';
+  ctx.beginPath(); ctx.arc(L * 0.7, -0.5, 0.6, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+}
+
 function drawSpecies(kind, x, y, p, s) {
   switch (kind) {
     case 'rabbit': return drawLeporid(x, y, p, s, '#8b6b4a', 8);
@@ -1880,6 +3083,7 @@ function drawSpecies(kind, x, y, p, s) {
     case 'pigeon': return drawPigeon(x, y, p, s);
     case 'duck': return drawPigeon(x, y, p, s, true);
     case 'swift': return drawSwift(x, y, p, s);
+    case 'trout': case 'pike': return drawFish(x, y, { kind, vx: p.vx ?? 1, ph: 0 }, s);
     case 'flock':
       for (let i = 0; i < 5; i++) {
         drawStarling(x + ((i % 3) - 1) * 9 * s, y + (i < 3 ? -4 : 5) * s, (p.flapT || 0) + i, s, p.vx ?? 1);
@@ -1987,23 +3191,159 @@ function drawSprite(kind, x, y, p, s) {
   const dir = facing(p), moving = p.moving ? 1 : 0;
   const img = cached(`${kind}|${dir}|${s}|${hi}|${fi}|${moving}`, s,
     () => drawSpecies(kind, 0, 0, { hopT, flapT, vx: dir, face: dir, moving: !!moving }, s));
-  ctx.drawImage(img, Math.round(x - img.width / 2), Math.round(y - img.height / 2));
+  // Mid-turn the sprite narrows (edge-on) before it flips; everything shrinks with the zoom-out
+  const k = spriteK(), sw = img.width * k * Math.max(0.2, Math.min(1, Math.abs(p.turn ?? 1))), sh = img.height * k;
+  ctx.drawImage(img, Math.round(x - sw / 2), Math.round(y - sh / 2), Math.round(sw), Math.round(sh));
 }
 function drawStarlingSprite(x, y, flap, s, dir) {
   const [fi, f] = quantize(flap, ANIM_PERIOD.star[1]);
   const d = dir < 0 ? -1 : 1;
   const img = cached(`star|${d}|${s}|${fi}`, s, () => drawStarling(0, 0, f, s, d));
-  ctx.drawImage(img, Math.round(x - img.width / 2), Math.round(y - img.height / 2));
+  const k = spriteK(), w = img.width * k, h = img.height * k;
+  ctx.drawImage(img, Math.round(x - w / 2), Math.round(y - h / 2), Math.round(w), Math.round(h));
+}
+
+// Gun sprite pointing along +x: 0 = hunter's rifle, 1 = auto-fire (drum mag), 2 = bazooka. flash draws the muzzle blast
+const gunStyle = () => gunBazooka() ? 2 : gunAuto() ? 1 : 0;
+const GUN_MUZZLE = [17, 15, 16];
+function drawRifle(x, y, ang, s, style = 0, flash = 0) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(ang);
+  if (Math.abs(wrapAngle(ang)) > Math.PI / 2) ctx.scale(1, -1);
+  ctx.scale(s, s);
+  if (style === 2) {
+    ctx.fillStyle = '#4d5a32';
+    ctx.fillRect(-14, -3, 30, 6);
+    ctx.fillStyle = '#39432a';
+    ctx.fillRect(-16, -3.6, 3, 7.2); ctx.fillRect(13, -3.6, 3, 7.2);
+    ctx.fillStyle = '#2a2a2e';
+    ctx.fillRect(-3, 3, 2.5, 4); ctx.fillRect(4, 3, 2.5, 3);
+    ctx.fillStyle = '#c9b458';
+    ctx.fillRect(-1, -5, 5, 2);
+  } else {
+    // Wooden stock and fore-end, steel receiver and barrel
+    ctx.fillStyle = '#7a4e2a';
+    ctx.beginPath(); ctx.moveTo(-14, -1.6); ctx.lineTo(-3, -1.8); ctx.lineTo(-3, 2.2); ctx.lineTo(-9, 2.4); ctx.lineTo(-14, 4); ctx.closePath(); ctx.fill();
+    ctx.fillRect(3, -0.6, 8, 2.6);
+    ctx.fillStyle = '#2a2a2e';
+    ctx.fillRect(-3, -2, 7, 3.6);
+    ctx.fillRect(4, -1.4, 13, 1.6);
+    ctx.fillRect(-1, 1.6, 1.6, 2.4);
+    if (style === 1) {
+      ctx.beginPath(); ctx.arc(3, 4.2, 3, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#55555c';
+      ctx.beginPath(); ctx.arc(3, 4.2, 1.2, 0, Math.PI * 2); ctx.fill();
+    } else {
+      ctx.fillStyle = '#1b1b1f';
+      ctx.fillRect(-1.5, -4, 5, 1.6);
+    }
+  }
+  if (flash > 0) {
+    const m = GUN_MUZZLE[style], f = 1 + flash * 8;
+    ctx.fillStyle = style === 2 ? '#ffb347' : '#ffe066';
+    ctx.beginPath();
+    ctx.moveTo(m, 0); ctx.lineTo(m + 3 * f, -2.5 * f); ctx.lineTo(m + 2 * f, 0); ctx.lineTo(m + 3 * f, 2.5 * f); ctx.closePath(); ctx.fill();
+    ctx.beginPath(); ctx.arc(m + 1, 0, 1.6 * f, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawGunStuff() {
+  ctx.filter = OUTLINE;
+  for (const g of state.guns) {
+    const x = toScreenX(g.x), y = toScreenY(g.alt) - 3;
+    if (x < -40 || x > W + 40) continue;
+    drawRifle(x, y, g.alt > 0 ? state.time * 6 : 0, 1.6, gunStyle());
+  }
+  // Rockets in flight
+  for (const r of state.rockets) {
+    const x = toScreenX(r.x), y = toScreenY(r.alt);
+    ctx.save(); ctx.translate(x, y); ctx.rotate(Math.atan2(-r.vy * cam.zoomY, r.vx * cam.zoom));
+    ctx.fillStyle = '#4d5a32'; ctx.fillRect(-6, -2, 10, 4);
+    ctx.fillStyle = '#c0392b'; ctx.beginPath(); ctx.moveTo(4, -2); ctx.lineTo(8, 0); ctx.lineTo(4, 2); ctx.fill();
+    ctx.fillStyle = '#ffb347'; ctx.beginPath(); ctx.moveTo(-6, -1.5); ctx.lineTo(-11 - Math.random() * 4, 0); ctx.lineTo(-6, 1.5); ctx.fill();
+    ctx.restore();
+  }
+  ctx.filter = 'none';
+  for (const b of state.blasts) {
+    const k = b.t / 0.6, r = ROCKET_BLAST * cam.zoom * (0.4 + 0.6 * Math.sqrt(k));
+    const x = toScreenX(b.x), y = toScreenY(b.alt);
+    ctx.fillStyle = `rgba(255,${150 + 80 * (1 - k)},60,${0.75 * (1 - k)})`;
+    ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = `rgba(255,255,220,${1 - k})`; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.arc(x, y, r * 1.1, 0, Math.PI * 2); ctx.stroke();
+  }
+  // Glint over grounded rifles so they're findable
+  for (const g of state.guns) {
+    if (g.alt > 0) continue;
+    const x = toScreenX(g.x), y = toScreenY(0) - 22 - Math.sin(state.time * 4) * 3;
+    if (x < -40 || x > W + 40) continue;
+    ctx.fillStyle = '#ffdd55';
+    ctx.beginPath(); ctx.moveTo(x - 6, y - 6); ctx.lineTo(x + 6, y - 6); ctx.lineTo(x, y + 2); ctx.fill();
+  }
+  for (const tr of state.tracers) {
+    ctx.strokeStyle = `rgba(255,230,140,${tr.t / 0.25})`; ctx.lineWidth = gunAuto() ? 2 : 3;
+    ctx.beginPath(); ctx.moveTo(toScreenX(tr.x0), toScreenY(tr.a0)); ctx.lineTo(toScreenX(tr.x1), toScreenY(tr.a1)); ctx.stroke();
+  }
+  if (gunAimHeld() && !state.over) {
+    const { ux, uy } = gunRay(), { t, hit } = gunTrace(ux, uy);
+    const x0 = toScreenX(bird.x), y0 = toScreenY(bird.alt);
+    const x1 = toScreenX(bird.x + ux * t), y1 = toScreenY(bird.alt + uy * t);
+    ctx.strokeStyle = hit ? 'rgba(255,40,30,0.9)' : 'rgba(255,120,100,0.5)'; ctx.lineWidth = hit ? 2.5 : 1.5;
+    ctx.setLineDash(hit ? [] : [6, 6]);
+    ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
+    ctx.setLineDash([]);
+    if (gunBazooka()) {
+      ctx.strokeStyle = 'rgba(255,150,60,0.8)'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.ellipse(x1, y1, ROCKET_BLAST * cam.zoom, ROCKET_BLAST * cam.zoomY, 0, 0, Math.PI * 2); ctx.stroke();
+    }
+    if (hit) {
+      const r = 14 + Math.sin(state.time * 10) * 2;
+      ctx.lineWidth = 2.5;
+      ctx.beginPath(); ctx.arc(x1, y1, r, 0, Math.PI * 2);
+      ctx.moveTo(x1 - r - 6, y1); ctx.lineTo(x1 - r + 4, y1); ctx.moveTo(x1 + r - 4, y1); ctx.lineTo(x1 + r + 6, y1);
+      ctx.moveTo(x1, y1 - r - 6); ctx.lineTo(x1, y1 - r + 4); ctx.moveTo(x1, y1 + r - 4); ctx.lineTo(x1, y1 + r + 6);
+      ctx.stroke();
+    }
+  }
+}
+
+// Screen angle the carried gun points: along the aim while held, otherwise along the flight
+function carriedGunAngle() {
+  const { ux, uy } = gunAimHeld() ? gunRay() : { ux: Math.cos(bird.angle), uy: Math.sin(bird.angle) };
+  return Math.atan2(-uy * cam.zoomY, ux * cam.zoom);
+}
+
+// Carried item: the gun is gripped in the talons just under the body; a turtle hangs lower
+function drawCarried(x, y, s) {
+  if (!bird.carrying) return;
+  if (bird.carrying.kind === 'gun') {
+    const ang = carriedGunAngle(), gx = x, gy = y + 7.5 * s;
+    // Legs from the body down to the grip
+    ctx.strokeStyle = '#e0b030'; ctx.lineWidth = 1.6 * s; ctx.lineCap = 'round';
+    for (const o of [-2, 2]) {
+      const lx = gx + Math.cos(ang) * o * s, ly = gy + Math.sin(ang) * o * s;
+      ctx.beginPath(); ctx.moveTo(x + o * s * 0.6, y + 1.5 * s); ctx.lineTo(lx, ly); ctx.stroke();
+    }
+    ctx.lineCap = 'butt';
+    drawRifle(gx, gy, ang, 1.05 * s, gunStyle(), bird.carrying.flash || 0);
+  } else {
+    drawTurtle(x, y + 15 * s, { vx: bird.vx }, SPECIES.turtle.scale * s / FALCON_SCALE);
+  }
 }
 
 function drawFallers() {
-  // While intentionally holding right-click to throw a carried turtle, show the simulated arc and target.
-  // A held right-click after a turtle has been caught should not paint a throw preview because it won't be released on that click.
-  if (mouse.aiming && bird.carrying && mouse.throwHeld) {
+  drawGunStuff();
+  // While intentionally holding right-click to throw a carried turtle, show the simulated arc (and, with Homing turtle, the target).
+  // With only the Sight upgrade, the plain-drop path is shown the whole time a turtle is carried.
+  const aiming = mouse.aiming && bird.carrying && bird.carrying.kind !== 'gun' && mouse.throwHeld && !state.over;
+  if (aiming) {
     const { vx, vy } = throwVelocity(true);
     const path = simulateThrow(bird.x, bird.alt, vx, vy);
-    let target = pickThrowTarget(path);
-    if (!target) {
+    const guided = turtleHoming() > 0;
+    let target = guided ? pickThrowTarget(path) : null;
+    if (guided && !target) {
       const end = path[path.length - 1];
       let best = null, bestD = Infinity;
       for (const r of state.rivals) {
@@ -2011,7 +3351,7 @@ function drawFallers() {
         const d = Math.hypot(r.x - end.x, r.alt - end.alt);
         if (d < bestD) { bestD = d; best = { kind: 'buzzard', x: r.x, alt: r.alt, target: r }; }
       }
-      if (best && bestD < THROW_LOCK_AIR + 10) target = best;
+      if (best && bestD < THROW_LOCK_AIR * lockScale() + 10) target = best;
     }
     ctx.setLineDash([4, 6]); ctx.strokeStyle = 'rgba(255,80,60,0.6)'; ctx.lineWidth = 2;
     ctx.beginPath();
@@ -2023,13 +3363,13 @@ function drawFallers() {
     ctx.beginPath(); ctx.ellipse(lx, gy, 12, 4, 0, 0, Math.PI * 2); ctx.stroke();
     ctx.beginPath(); ctx.moveTo(lx - 6, gy - 6); ctx.lineTo(lx + 6, gy + 6); ctx.moveTo(lx + 6, gy - 6); ctx.lineTo(lx - 6, gy + 6); ctx.stroke();
     if (target) {
-      const isAir = isBuzzardTarget(target) || SPECIES[target.kind]?.air;
-      const tx = toScreenX(target.x), ty = isAir ? toScreenY(target.alt) : gy - 10;
+      const isAir = isBuzzardTarget(target) || target.air || SPECIES[target.kind]?.air;
+      const tx = toScreenX(target.x), ty = isAir ? toScreenY(target.alt) : gy - (target.kind === 'hunter' ? 25 * HAZARD_SCALE : 10);
       const r = 16 + Math.sin(state.time * 10) * 2;
       ctx.strokeStyle = '#ff5544'; ctx.lineWidth = 3;
       ctx.beginPath(); ctx.arc(tx, ty, r, 0, Math.PI * 2); ctx.stroke();
       ctx.beginPath(); ctx.moveTo(tx - r - 6, ty); ctx.lineTo(tx - r + 4, ty); ctx.moveTo(tx + r - 4, ty); ctx.lineTo(tx + r + 6, ty); ctx.stroke();
-      if (isBuzzardTarget(target)) {
+      if (isBuzzardTarget(target) || HAZARD_NAME[target.kind]) {
         ctx.beginPath(); ctx.arc(tx, ty, r + 8, 0, Math.PI * 2); ctx.stroke();
       }
     }
@@ -2140,7 +3480,10 @@ function drawBirdLens() {
   if (!birdAboveScreen()) return;
   const { x, y } = birdAnchor();
   drawLens(x, y, '#9cc8ef', () => {
-    if (bird.carrying) drawTurtle(x, y + 18, { vx: bird.vx }, 1.2);
+    if (bird.carrying) {
+      if (bird.carrying.kind === 'gun') drawRifle(x, y + 14, 0, 1.4, gunStyle());
+      else drawTurtle(x, y + 18, { vx: bird.vx }, 1.2);
+    }
     drawBirdSprite(x, y, birdScreenAngle(), 1.8);
   });
   const label = `+${(bird.alt - MAX_ALT).toFixed(0)} m`;
@@ -2155,10 +3498,12 @@ function drawBirdLens() {
 function drawBird() {
   const sx = toScreenX(bird.x), sy = toScreenY(bird.alt);
   ctx.filter = OUTLINE;
-  if (bird.carrying) drawTurtle(sx, sy + 22, { vx: bird.vx }, SPECIES.turtle.scale);
-  // Player sprite is deliberately oversized and grows further when zoomed out
-  drawBirdSprite(sx, sy, birdScreenAngle(), Math.max(FALCON_SCALE, cam.zoom / 35));
-  ctx.filter = 'none';
+  const sprite = FALCON_SCALE * spriteK();
+  if (bird.invulnT > 0) ctx.globalAlpha = 0.45 + 0.45 * Math.sin(state.time * 30);
+  if (bird.carrying) drawCarried(sx, sy, sprite);
+  // Player sprite shrinks with the zoom-out like everything else
+  drawBirdSprite(sx, sy, birdScreenAngle(), sprite);
+  ctx.filter = 'none'; ctx.globalAlpha = 1;
 
   // Speed streaks
   if (bird.speed > DIVE_SPEED) {
@@ -2171,6 +3516,65 @@ function drawBird() {
       ctx.stroke();
     }
   }
+}
+
+// Breath left underwater: a row of bubbles above the bird
+function drawBreath(x, y) {
+  const n = 7, k = (bird.breath ?? BREATH_TIME) / BREATH_TIME, lit = Math.ceil(k * n);
+  for (let i = 0; i < n; i++) {
+    const bx = x + (i - (n - 1) / 2) * 9;
+    ctx.beginPath(); ctx.arc(bx, y, 3.5, 0, Math.PI * 2);
+    ctx.fillStyle = i < lit ? (k < 0.3 ? '#ff9a7a' : '#bfe8ff') : 'rgba(255,255,255,0.12)';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.7)'; ctx.lineWidth = 1; ctx.stroke();
+  }
+  if (k <= 0) {
+    ctx.fillStyle = '#ff9a7a'; ctx.font = 'bold 11px sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText('out of breath!', x, y - 9);
+  }
+}
+
+// Young hawks: small rufous-brown buteo-ish birds, carrying their catch for a while
+function drawEyases() {
+  if (!state.eyases) return;
+  const s = 0.75 * spriteK() * FALCON_SCALE;
+  ctx.filter = OUTLINE;
+  for (const e of state.eyases) {
+    const x = toScreenX(e.x), y = toScreenY(e.alt);
+    if (x < -40 || x > W + 40 || y < -40 || y > H + 40) continue;
+    const f = e.mode === 'chase' ? 0.25 + 0.3 * Math.sin(e.flapT * 1.4) : Math.sin(e.flapT);
+    const ang = Math.atan2(e.vy * cam.zoomY, e.vx * cam.zoom);
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(-ang * (e.mode === 'chase' ? 1 : 0.4));
+    ctx.scale(s, s * (Math.cos(ang) < 0 ? -1 : 1));
+    ctx.fillStyle = '#9a6a3c';
+    ctx.beginPath(); ctx.moveTo(3, -1); ctx.lineTo(-3, -2 - f * 11); ctx.lineTo(-10, -1 - f * 8); ctx.lineTo(-5, 1); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = '#7a4e2a';
+    ctx.beginPath(); ctx.ellipse(0, 0, 8.5, 3.2, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#f0dcb4';
+    ctx.beginPath(); ctx.ellipse(1, 1.4, 5, 1.5, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#7a4e2a';
+    ctx.beginPath(); ctx.moveTo(-7, 0); ctx.lineTo(-14, -2.5); ctx.lineTo(-14, 2.5); ctx.fill();
+    ctx.beginPath(); ctx.arc(8, -1, 2.8, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#ffe14a';
+    ctx.beginPath(); ctx.moveTo(10.5, -1.5); ctx.lineTo(13, 0); ctx.lineTo(10.5, 0.6); ctx.fill();
+    if (e.carry) { ctx.fillStyle = '#6b5a48'; ctx.beginPath(); ctx.ellipse(0, 5.5, 3.5, 2, 0, 0, Math.PI * 2); ctx.fill(); }
+    ctx.restore();
+  }
+  ctx.filter = 'none';
+}
+
+function drawFeatherFx() {
+  for (const f of state.featherFx) {
+    ctx.save();
+    ctx.translate(toScreenX(f.x), toScreenY(f.alt)); ctx.rotate(f.rot);
+    ctx.globalAlpha = Math.min(1, f.life);
+    ctx.fillStyle = '#fff4d6';
+    ctx.beginPath(); ctx.ellipse(0, 0, 5, 1.6, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+  }
+  ctx.globalAlpha = 1;
 }
 
 function drawBirdSprite(sx, sy, screenAngle, sprite) {
@@ -2301,7 +3705,17 @@ function drawHUD() {
   ctx.fillStyle = bird.alt > MAX_ALT ? '#66ccff' : '#ffdd55'; ctx.textAlign = 'left';
   ctx.fillText(altLabel, mx + 29, ay + 4);
 
-  if (bird.carrying) {
+  if (bird.carrying && bird.carrying.kind === 'gun') {
+    const text = gunAuto() ? 'Hold right-click to spray · Space drops'
+      : gunFreeAim() ? 'Hold right-click: course holds, cursor aims · release fires · Space drops'
+      : 'Hold right-click: fires straight ahead on release · Space drops';
+    ctx.font = 'bold 14px sans-serif'; ctx.textAlign = 'center';
+    const tw = ctx.measureText(text).width + 24;
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    ctx.fillRect(W / 2 - tw / 2, 14, tw, 26);
+    ctx.fillStyle = '#ffdd55';
+    ctx.fillText(text, W / 2, 32);
+  } else if (bird.carrying) {
     // Marker: the lowest altitude from which a release at your current speed would still crack the shell
     const needH = (SHELL_CRACK_SPEED ** 2 - bird.vx ** 2 - bird.vy ** 2) / (2 * G);
     if (needH > 0) {
@@ -2311,9 +3725,10 @@ function drawHUD() {
     }
     const impact = predictImpact(bird.alt, bird.vx, bird.vy);
     const ready = impact >= SHELL_CRACK_SPEED;
-    const pts = Math.round(SPECIES.turtle.pts + (impact - SHELL_CRACK_SPEED) * 20);
+    const est = priceCatch('turtle', { impact }, true).value;
+    const how = 'hold right-click to aim, release to throw · Space drops';
     const text = ready
-      ? `Drop now: ~${(impact * 3.6).toFixed(0)} km/h impact (+${pts})  ·  hold right-click to aim, release to throw`
+      ? `Drop now: ~${(impact * 3.6).toFixed(0)} km/h impact (~$${est})  ·  ${how}`
       : `Turtle would hit at ~${(impact * 3.6).toFixed(0)} km/h — need ${(SHELL_CRACK_SPEED * 3.6).toFixed(0)}. Climb or dive faster`;
     ctx.font = 'bold 15px sans-serif'; ctx.textAlign = 'center';
     const tw = ctx.measureText(text).width + 24;
@@ -2325,6 +3740,8 @@ function drawHUD() {
 
   // Readouts
   drawSpeedometer(240, H - 170, 80);
+  if (bird.carrying && bird.carrying.kind === 'gun') drawAmmo(360, H - 170 - 68);
+  drawPerks(bird.carrying && bird.carrying.kind === 'gun' ? 488 : 360, H - 170 - 68);
   drawCatchLog();
 
   // Scale bar
@@ -2341,6 +3758,10 @@ function drawHUD() {
     ctx.fillStyle = state.over ? '#ff5555' : '#ffffff';
     ctx.font = 'bold 24px sans-serif'; ctx.textAlign = 'center';
     ctx.fillText(state.msg, W / 2, H / 2 - 80);
+    if (state.msgTags && state.msgTagsFor === state.msg) {
+      ctx.fillStyle = '#ffdd55'; ctx.font = 'bold 14px sans-serif';
+      ctx.fillText(state.msgTags, W / 2, H / 2 - 56);
+    }
   }
   if (state.toast && state.toast.t > 0) {
     ctx.globalAlpha = Math.min(1, state.toast.t);
@@ -2357,8 +3778,59 @@ function drawHUD() {
 
 }
 
+// Small badges for the whacky upgrades: screech cooldown, lucky feathers left, eyases
+function drawPerks(x, y) {
+  const rows = [];
+  const st = tier('screech');
+  if (st) {
+    const cd = state.screechCD || 0;
+    rows.push([cd > 0 ? `E screech ${Math.ceil(cd)}s` : 'E screech ready', cd > 0 ? '#9aa7b8' : '#ff9ad6', 1 - cd / SCREECH.cool[st]]);
+  }
+  if (tier('lucky')) rows.push([`Lucky feather ×${state.feathers}`, state.feathers ? '#fff1b8' : '#9aa7b8', null]);
+  if (tier('eyas') && state.eyases) {
+    const hunting = state.eyases.filter(e => e.mode === 'chase').length;
+    rows.push([`Eyases ${state.eyases.length}${hunting ? ` · ${hunting} hunting` : ''}`, '#d9a46a', null]);
+  }
+  rows.forEach(([text, col, k], i) => {
+    const ry = y + i * 26;
+    ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fillRect(x, ry, 150, 22);
+    if (k != null) { ctx.fillStyle = 'rgba(255,154,214,0.25)'; ctx.fillRect(x, ry, 150 * clamp(k, 0, 1), 22); }
+    ctx.fillStyle = col; ctx.font = 'bold 12px sans-serif'; ctx.textAlign = 'left';
+    ctx.fillText(text, x + 8, ry + 15);
+  });
+}
+
+// Ammo panel beside the brake bar: weapon, then one round per shot left (a bar + count for the 30-round drum)
+function drawAmmo(x, y) {
+  const g = bird.carrying, max = gunStat('ammo'), n = g.ammo, style = gunStyle();
+  const w = 118, h = 136;
+  ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fillRect(x, y, w, h);
+  ctx.strokeStyle = n <= Math.max(1, max * 0.2) ? '#ff7766' : 'rgba(255,221,85,0.5)'; ctx.lineWidth = 1;
+  ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+  ctx.filter = OUTLINE;
+  drawRifle(x + w / 2 - 2, y + 26, 0, 2.4, style, g.flash || 0);
+  ctx.filter = 'none';
+  ctx.fillStyle = '#ffdd55'; ctx.font = 'bold 26px monospace'; ctx.textAlign = 'center';
+  ctx.fillText(`${n}`, x + w / 2, y + 74);
+  ctx.fillStyle = '#cfe6f7'; ctx.font = '10px monospace';
+  ctx.fillText(`/ ${max} ${style === 2 ? 'ROCKETS' : 'SHOTS'}`, x + w / 2, y + 88);
+  const by = y + 100;
+  if (max <= 8) {
+    const rw = style === 2 ? 11 : 7, gap = 4, tot = max * rw + (max - 1) * gap;
+    for (let i = 0; i < max; i++) {
+      const rx = x + (w - tot) / 2 + i * (rw + gap), on = i < n;
+      ctx.fillStyle = on ? (style === 2 ? '#8a9a52' : '#d9a74a') : 'rgba(255,255,255,0.15)';
+      ctx.fillRect(rx, by + 6, rw, 18);
+      if (on) { ctx.fillStyle = style === 2 ? '#c0392b' : '#b07a2a'; ctx.fillRect(rx, by, rw, 6); }
+    }
+  } else {
+    ctx.fillStyle = 'rgba(255,255,255,0.15)'; ctx.fillRect(x + 12, by + 6, w - 24, 14);
+    ctx.fillStyle = '#d9a74a'; ctx.fillRect(x + 12, by + 6, (w - 24) * n / max, 14);
+  }
+}
+
 function drawSpeedometer(cx, cy, r) {
-  const MAX_KMH = 360, A0 = Math.PI * 0.75, SWEEP = Math.PI * 1.5;
+  const MAX_KMH = Math.max(360, Math.ceil(topKmh() / 60) * 60), A0 = Math.PI * 0.75, SWEEP = Math.PI * 1.5;
   const ang = kmh => A0 + SWEEP * Math.min(kmh, MAX_KMH) / MAX_KMH;
   const kmh = bird.speed * 3.6;
 
@@ -2452,12 +3924,51 @@ function drawSpeedometer(cx, cy, r) {
   ctx.fillText(`V/S ${vs >= 0 ? '▲' : '▼'} ${Math.abs(vs).toFixed(1)} m/s`, cx, cy + r + 54);
 }
 
+// Round species badge used on catch cards and the day recap
+function drawCatchIcon(targetKind, ix, iy, ir, turtleHit) {
+  const water = SPECIES[targetKind]?.air === 'water';
+  const air = targetKind === 'cat' || targetKind === 'hunter' || water ? false : SPECIES[targetKind]?.air ?? true;
+  const k = ir / 14;
+  ctx.save();
+  ctx.beginPath(); ctx.arc(ix, iy, ir, 0, Math.PI * 2); ctx.clip();
+  ctx.fillStyle = water ? '#4a88b8' : '#cfe6f7'; ctx.fillRect(ix - ir, iy - ir, ir * 2, ir * 2);
+  if (water) {
+    ctx.fillStyle = '#cfe6f7'; ctx.fillRect(ix - ir, iy - ir, ir * 2, ir * 0.45);
+    drawFish(ix, iy + 2 * k, { kind: targetKind, vx: 1, ph: 0 }, (targetKind === 'pike' ? 1 : 1.3) * k);
+  } else if (!air) { ctx.fillStyle = '#7fae55'; ctx.fillRect(ix - ir, iy + 11 * k, ir * 2, ir); }
+  if (water) { /* drawn above */ } else if (targetKind === 'buzzard') {
+    drawBuzzard(ix, iy, { flapT: 1.2 }, 0.9 * k);
+  } else if (targetKind === 'cat') {
+    drawCat(ix - 2 * k, iy + 11 * k, { mode: 'sit', dir: 1 }, 0.85 * k);
+  } else if (targetKind === 'hunter') {
+    drawHunter(ix, iy + 13 * k, { tracking: false, flash: 0 }, 0.6 * k);
+  } else if (targetKind === 'hawk') {
+    drawHawk(ix, iy, { mode: 'stalk', flapT: 1.2, vx: 1, vy: 0 }, 0.85 * k);
+  } else {
+    drawSpecies(targetKind, ix, air ? iy : iy + 11 * k, { hopT: 0, vx: 1, flapT: 1.2 }, animalScaleFor(targetKind) / ICON_SCALE * k);
+  }
+  ctx.restore();
+  ctx.beginPath(); ctx.arc(ix, iy, ir, 0, Math.PI * 2);
+  ctx.strokeStyle = 'rgba(255,255,255,0.8)'; ctx.lineWidth = 1.5; ctx.stroke();
+  if (turtleHit) drawTurtle(ix + 9 * k, iy + 15 * k, { vx: 1 }, 0.7 * k);
+}
+
 function drawCatchLog() {
   const log = state.catchLog;
   const right = W - 14;
   ctx.textAlign = 'right';
-  ctx.fillStyle = '#fff'; ctx.font = 'bold 18px sans-serif';
-  ctx.fillText(`SCORE ${state.score}`, right, 28);
+  ctx.fillStyle = '#ffdd55'; ctx.font = 'bold 18px sans-serif';
+  ctx.fillText(`DAY ${state.day}  ·  TODAY $${state.score}`, right, 28);
+  // Chain multiplier with a bar showing time left to extend it
+  const chain = chainMult();
+  if (chain > 1) {
+    const left = 1 - (state.time - state.chainT) / CHAIN_TIME;
+    const cy = log.length ? 104 : 40;
+    ctx.fillStyle = '#ff9f40'; ctx.font = 'bold 15px sans-serif';
+    ctx.fillText(`CHAIN ×${chain.toFixed(1)}`, right, cy + 12);
+    ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(right - 90, cy + 18, 90, 5);
+    ctx.fillStyle = '#ff9f40'; ctx.fillRect(right - 90 * left, cy + 18, 90 * left, 5);
+  }
   if (!log.length) return;
 
   const CW = 92, CH = 50, GAP = 6;
@@ -2473,28 +3984,13 @@ function drawCatchLog() {
   for (const c of shown) {
     const fresh = state.time - c.t < 1.5;
     const targetKind = c.targetKind || c.kind;
-    const isBuzzardHit = !!c.buzzard || targetKind === 'buzzard';
     ctx.fillStyle = 'rgba(0,0,0,0.55)';
     ctx.fillRect(x, y, CW, CH);
     ctx.strokeStyle = fresh ? '#ffdd55' : 'rgba(255,255,255,0.35)';
     ctx.lineWidth = fresh ? 2 : 1;
     ctx.strokeRect(x + 0.5, y + 0.5, CW - 1, CH - 1);
-    const air = SPECIES[targetKind]?.air ?? true;
     // Light badge behind the icon so dark animals (starlings, swifts) stay visible
-    const ix = x + 17, iy = y + 25, ir = 14;
-    ctx.save();
-    ctx.beginPath(); ctx.arc(ix, iy, ir, 0, Math.PI * 2); ctx.clip();
-    ctx.fillStyle = '#cfe6f7'; ctx.fillRect(ix - ir, iy - ir, ir * 2, ir * 2);
-    if (!air) { ctx.fillStyle = '#7fae55'; ctx.fillRect(ix - ir, y + 36, ir * 2, ir); }
-    if (targetKind === 'buzzard') {
-      drawBuzzard(ix, iy, { flapT: 1.2 }, 0.9);
-    } else {
-      drawSpecies(targetKind, ix, air ? iy : y + 36, { hopT: 0, vx: 1, flapT: 1.2 }, animalScaleFor(targetKind) / ICON_SCALE);
-    }
-    ctx.restore();
-    ctx.beginPath(); ctx.arc(ix, iy, ir, 0, Math.PI * 2);
-    ctx.strokeStyle = 'rgba(255,255,255,0.8)'; ctx.lineWidth = 1.5; ctx.stroke();
-    if (c.turtleHit) drawTurtle(ix + 9, iy + 15, { vx: 1 }, 0.7);
+    drawCatchIcon(targetKind, x + 17, y + 25, 14, c.turtleHit);
     if (c.count > 1) {
       ctx.font = 'bold 12px sans-serif'; ctx.textAlign = 'left';
       ctx.strokeStyle = '#000'; ctx.lineWidth = 3; ctx.strokeText(`×${c.count}`, x + 3, y + 13);
@@ -2507,9 +4003,8 @@ function drawCatchLog() {
     const spW = ctx.measureText(sp).width;
     ctx.fillStyle = '#bbb'; ctx.font = '9px monospace';
     ctx.fillText(c.rel != null ? 'rel' : 'km/h', x + 37 + spW, y + 21);
-    ctx.fillStyle = '#9fd8ff'; ctx.font = '11px monospace';
-    const detail = isBuzzardHit ? 'buzzard!' : c.turtleHit ? 'turtle!' : c.drop != null ? `↓${c.drop.toFixed(0)} m` : c.air ? `@${c.alt.toFixed(0)} m` : `▼${c.minAlt.toFixed(1)} m`;
-    ctx.fillText(detail, x + 34, y + 39);
+    ctx.fillStyle = '#ffdd55'; ctx.font = 'bold 13px monospace';
+    ctx.fillText(`$${c.pts}`, x + 34, y + 40);
     x += CW + GAP;
   }
 }
@@ -2537,6 +4032,8 @@ function drawPauseButton() {
   ctx.beginPath(); ctx.arc(x + w + 22, y + 22, 7, 0, Math.PI * 2); ctx.fill();
   if (!sunUp) { ctx.fillStyle = 'rgba(0,0,0,0.9)'; ctx.beginPath(); ctx.arc(x + w + 25, y + 20, 6, 0, Math.PI * 2); ctx.fill(); }
   ctx.fillStyle = '#fff'; ctx.font = 'bold 14px monospace'; ctx.textAlign = 'left';
+  // Clock pulses orange in the last half hour of the hunt
+  if (huntHour() >= DUSK_WARN_HOUR) ctx.fillStyle = `rgba(255,${140 + Math.sin(state.time * 8) * 60},60,1)`;
   ctx.fillText(clockText(), x + w + 34, y + 27);
 }
 
@@ -2607,8 +4104,10 @@ function drawSoundRings() {
     ctx.ellipse(toScreenX(r.x), toScreenY(r.alt), Math.max(1, rad * cam.zoom), Math.max(1, rad * cam.zoomY), 0, 0, Math.PI * 2);
     ctx.strokeStyle = r.kind === 'brake' ? `rgba(140,210,255,${0.25 * (1 - k)})`
       : r.kind === 'wind' ? `rgba(220,230,255,${0.12 * (1 - k)})`
+      : r.kind === 'shot' ? `rgba(255,190,120,${0.6 * (1 - k)})`
+      : r.kind === 'screech' ? `rgba(255,120,200,${0.8 * (1 - k)})`
       : `rgba(255,255,255,${0.3 * (1 - k)})`;
-    ctx.lineWidth = 1;
+    ctx.lineWidth = r.kind === 'screech' ? 4 : 1;
     ctx.stroke();
   }
 }
@@ -2696,6 +4195,211 @@ function drawRivals() {
   for (const r of state.rivals) if (!r.gone && r.alertT > 0) drawAlert(toScreenX(r.x), toScreenY(r.alt) - 24);
 }
 
+// ---------- Hazard drawing ----------
+const HAZARD_SCALE = 1.5;
+
+function drawCat(x, y, c, s) {
+  const crouch = c.mode === 'crouch', leap = c.mode === 'leap';
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.scale(c.dir * s, s);
+  if (leap) ctx.rotate(-Math.atan2(c.vy, Math.abs(c.vx) + 1) * 0.6);
+  ctx.fillStyle = '#3b3530';
+  const bh = crouch ? 4 : 6;
+  ctx.beginPath(); ctx.ellipse(0, -bh, leap ? 12 : 10, crouch ? 3.5 : 4.5, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(10, -bh - 3, 4.5, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(7, -bh - 6); ctx.lineTo(8.5, -bh - 11); ctx.lineTo(11, -bh - 6.5);
+  ctx.moveTo(10.5, -bh - 6.5); ctx.lineTo(13.5, -bh - 10.5); ctx.lineTo(14, -bh - 5); ctx.fill();
+  ctx.strokeStyle = '#3b3530'; ctx.lineWidth = 2.2; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(-9, -bh); ctx.quadraticCurveTo(-17, -bh - (leap ? 2 : 10), -15, -bh - (leap ? 0 : 14)); ctx.stroke();
+  if (!leap) {
+    ctx.beginPath(); ctx.moveTo(-6, -bh + 2); ctx.lineTo(-6, 0); ctx.moveTo(6, -bh + 2); ctx.lineTo(6, 0); ctx.stroke();
+  } else {
+    ctx.beginPath(); ctx.moveTo(8, -bh + 1); ctx.lineTo(16, -bh + 3); ctx.moveTo(-7, -bh + 1); ctx.lineTo(-15, -bh + 4); ctx.stroke();
+  }
+  ctx.fillStyle = '#e8d040';
+  ctx.beginPath(); ctx.arc(12, -bh - 3.5, 1.2, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+}
+
+function drawHunter(x, y, h, s) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.scale(s, s);
+  const face = h.tracking ? Math.sign(toScreenX(h.ax) - x) || 1 : 1;
+  ctx.fillStyle = '#4a5a32';
+  ctx.fillRect(-4, -14, 3, 14); ctx.fillRect(1, -14, 3, 14);
+  ctx.fillRect(-5, -28, 10, 15);
+  ctx.fillStyle = '#e0b48a';
+  ctx.beginPath(); ctx.arc(0, -32, 4, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#e06a1a';
+  ctx.fillRect(-6, -36, 12, 3); ctx.fillRect(-4, -39, 8, 3);
+  // Rifle points at the current aim
+  const ang = h.tracking ? Math.atan2(toScreenY(h.aalt) - (y - 26 * s), toScreenX(h.ax) - x) : face > 0 ? -0.5 : Math.PI + 0.5;
+  ctx.translate(0, -25);
+  ctx.rotate(ang);
+  ctx.fillStyle = '#2a1d12';
+  ctx.fillRect(-4, -1.5, 22, 3);
+  if (h.flash > 0) {
+    ctx.fillStyle = '#ffd36b';
+    ctx.beginPath(); ctx.moveTo(18, 0); ctx.lineTo(28, -5); ctx.lineTo(30, 0); ctx.lineTo(28, 5); ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawHawk(x, y, h, s) {
+  const stoop = h.mode === 'stoop';
+  const f = stoop ? 0.15 : Math.sin(h.flapT);
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(Math.atan2(-h.vy, h.vx) * (stoop ? 1 : 0.4));
+  ctx.scale(s, s * (Math.abs(Math.atan2(-h.vy, h.vx)) > Math.PI / 2 ? -1 : 1));
+  ctx.fillStyle = '#4e5660';
+  ctx.beginPath(); ctx.moveTo(4, -1); ctx.lineTo(-4, -2 - f * 14); ctx.lineTo(-13, -1 - f * 10); ctx.lineTo(-6, 1); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = '#3e454e';
+  ctx.beginPath(); ctx.ellipse(0, 0, 11, 3.8, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#d9d9d0';
+  ctx.beginPath(); ctx.ellipse(1, 1.8, 7, 1.8, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#3e454e';
+  ctx.beginPath(); ctx.moveTo(-10, 0); ctx.lineTo(-19, -3); ctx.lineTo(-19, 3); ctx.fill();
+  ctx.beginPath(); ctx.arc(10, -1, 3.4, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#ff7a1a';
+  ctx.beginPath(); ctx.arc(11, -1.6, 1.1, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#e8c040';
+  ctx.beginPath(); ctx.moveTo(13, -2); ctx.lineTo(16, 0); ctx.lineTo(13, 0.8); ctx.fill();
+  ctx.restore();
+}
+
+// Hunters stand behind the grass; cats only show when they break cover (hidden ones just show ears and eyes)
+function drawHazardsBehind() {
+  const gy = toScreenY(0);
+  ctx.filter = OUTLINE;
+  for (const h of state.hazards.hunters) {
+    const x = toScreenX(h.x);
+    if (x < -60 || x > W + 60) continue;
+    drawHunter(x, gy, h, HAZARD_SCALE);
+  }
+  ctx.filter = 'none';
+}
+
+function drawHazardsFront() {
+  const hz = state.hazards, gy = toScreenY(0);
+  for (const c of hz.cats) {
+    const x = toScreenX(c.x);
+    if (x < -40 || x > W + 40) continue;
+    if (c.mode === 'hide') {
+      // Eyes open now and then (more often while stalking); the rest of the time the cat is almost invisible
+      c.ph ??= Math.random() * 100;
+      const blink = Math.sin(state.time * 1.3 + c.ph) + 0.5 * Math.sin(state.time * 3.1 + c.ph * 2);
+      const eyesOpen = blink > (c.stalk ? 0.4 : 1.1);
+      if (gy > H + 4) continue;
+      // Ear tips poke out of the grass; the eyes glint only when open
+      const ex = x + c.dir * 11 * HAZARD_SCALE, ey = gy - 4 * HAZARD_SCALE;
+      ctx.save(); ctx.translate(ex, ey); ctx.scale(1.3, 1.3);
+      ctx.fillStyle = '#4a5a2a';
+      ctx.beginPath();
+      ctx.moveTo(-5, 1); ctx.lineTo(-3, -8); ctx.lineTo(-0.5, 0);
+      ctx.moveTo(0.5, 0); ctx.lineTo(3.5, -8); ctx.lineTo(5.5, 1); ctx.fill();
+      if (eyesOpen) {
+        ctx.fillStyle = 'rgba(255,225,74,0.25)';
+        ctx.beginPath(); ctx.arc(0.25, 1, 5, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = '#ffe14a';
+        ctx.beginPath(); ctx.arc(-2, 1, 1.4, 0, Math.PI * 2); ctx.moveTo(3.9, 1); ctx.arc(2.5, 1, 1.4, 0, Math.PI * 2); ctx.fill();
+      }
+      ctx.restore();
+      continue;
+    }
+    ctx.filter = OUTLINE;
+    drawCat(x, toScreenY(c.alt), c, HAZARD_SCALE);
+    ctx.filter = 'none';
+    if (c.alertT > 0) drawAlert(x, toScreenY(c.alt) - 30, '!', 1, 'sight');
+  }
+  for (const h of hz.hunters) {
+    if (state.over && !(h.tracer > 0)) continue;
+    const x = toScreenX(h.x), y = gy - 25 * HAZARD_SCALE;
+    // The shot line, extended well past the aim point
+    const shotEnd = () => {
+      const dx = h.ax - h.x, dy = h.aalt - 1.6, len = Math.hypot(dx, dy) || 1;
+      return [toScreenX(h.x + dx / len * 600), toScreenY(1.6 + dy / len * 600)];
+    };
+    if (h.tracer > 0) {
+      const [ex, ey] = shotEnd();
+      ctx.strokeStyle = `rgba(255,230,140,${h.tracer / 0.3})`; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(ex, ey); ctx.stroke();
+      continue;
+    }
+    if (h.aim > 0) {
+      // About to fire: solid, pulsing laser line along the shot
+      const [ex, ey] = shotEnd(), k = 1 - h.aim / HUNTER_AIM_T;
+      ctx.strokeStyle = `rgba(255,30,20,${0.55 + 0.35 * Math.sin(state.time * 30)})`; ctx.lineWidth = 2 + 2 * k;
+      ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(ex, ey); ctx.stroke();
+      const ax = toScreenX(h.ax), ay = toScreenY(h.aalt);
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(ax, ay, 14 - 6 * k, 0, Math.PI * 2); ctx.stroke();
+      continue;
+    }
+    if (!h.tracking || h.reload > 0) continue;
+    // Sight line: faint while tracking, brighter as the lock builds
+    ctx.strokeStyle = `rgba(255,40,30,${0.12 + 0.6 * h.lock})`; ctx.lineWidth = 1 + h.lock * 1.5;
+    ctx.setLineDash([6, 6]);
+    ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(toScreenX(h.ax), toScreenY(h.aalt)); ctx.stroke();
+    ctx.setLineDash([]);
+    if (h.lock > 0.05) {
+      const ax = toScreenX(h.ax), ay = toScreenY(h.aalt), r = 18 - h.lock * 8;
+      ctx.strokeStyle = `rgba(255,40,30,${0.4 + 0.6 * h.lock})`; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(ax, ay, r, 0, Math.PI * 2);
+      ctx.moveTo(ax - r - 5, ay); ctx.lineTo(ax - r + 4, ay); ctx.moveTo(ax + r - 4, ay); ctx.lineTo(ax + r + 5, ay);
+      ctx.moveTo(ax, ay - r - 5); ctx.lineTo(ax, ay - r + 4); ctx.moveTo(ax, ay + r - 4); ctx.lineTo(ax, ay + r + 5);
+      ctx.stroke();
+    }
+  }
+  const h = hz.hawk;
+  if (h) {
+    const x = toScreenX(h.x), y = toScreenY(h.alt);
+    ctx.filter = OUTLINE;
+    if (x > -60 && x < W + 60 && y > -60 && y < H + 60) drawHawk(x, y, h, 1.7);
+    ctx.filter = 'none';
+    if (h.alertT > 0) drawAlert(x, y - 26, '!', 1, 'sight');
+  }
+}
+
+// Edge-of-screen marker for an off-screen goshawk, and a banner when something is about to get you
+function drawHazardWarnings() {
+  if (state.over) return;
+  const h = state.hazards.hawk;
+  if (h && h.mode !== 'leave') {
+    const x = toScreenX(h.x), y = toScreenY(h.alt);
+    if (x < 0 || x > W || y < 0 || y > H) {
+      const { x: bx, y: by } = birdAnchor();
+      const dx = x - bx, dy = y - by, len = Math.hypot(dx, dy) || 1, ux = dx / len, uy = dy / len;
+      let t = Infinity;
+      if (ux > 0) t = Math.min(t, (W - 30 - bx) / ux);
+      if (ux < 0) t = Math.min(t, (30 - bx) / ux);
+      if (uy > 0) t = Math.min(t, (H - 30 - by) / uy);
+      if (uy < 0) t = Math.min(t, (30 - by) / uy);
+      const cx = bx + ux * t, cy = by + uy * t;
+      ctx.fillStyle = h.mode === 'stoop' ? '#ff4433' : 'rgba(255,140,60,0.85)';
+      ctx.beginPath(); ctx.arc(cx, cy, 14, 0, Math.PI * 2); ctx.fill();
+      ctx.save(); ctx.translate(cx, cy); ctx.scale(0.8, 0.8);
+      drawHawk(0, 0, { ...h, vx: 1, vy: 0, mode: 'stalk' }, 0.9);
+      ctx.restore();
+    }
+  }
+  let warn = null;
+  if (h && h.mode === 'stoop') warn = h.commit ? 'GOSHAWK STRIKING — DIVE OR CLIMB NOW!' : 'GOSHAWK STOOPING — break away when it commits (!)';
+  const hs = state.hazards.hunters;
+  const lock = Math.max(0, ...hs.filter(x => x.tracking && x.reload <= 0).map(x => x.lock));
+  if (lock > 0.35) warn = 'HUNTER TRACKING YOU — fly faster or get out of range!';
+  if (hs.some(x => x.aim > 0)) warn = 'HUNTER AIMING — change course NOW!';
+  if (!warn) return;
+  ctx.font = 'bold 16px sans-serif'; ctx.textAlign = 'center';
+  const tw = ctx.measureText(warn).width + 28;
+  ctx.fillStyle = `rgba(150,10,10,${0.55 + 0.25 * Math.sin(state.time * 12)})`;
+  ctx.fillRect(W / 2 - tw / 2, H - 120, tw, 30);
+  ctx.fillStyle = '#fff';
+  ctx.fillText(warn, W / 2, H - 99);
+}
+
 // Storm darkening, rain and lightning; plus night and golden-hour tints over the world
 function drawAtmosphere() {
   const d = daylight(), tw = twilight(), s = state.storm;
@@ -2731,7 +4435,170 @@ function drawCrashSmoke() {
   ctx.restore();
 }
 
+// ---------- Recap & Roost screens ----------
+function drawPanel(x, y, w, h) {
+  ctx.fillStyle = 'rgba(12,20,34,0.94)';
+  ctx.fillRect(x, y, w, h);
+  ctx.strokeStyle = 'rgba(255,211,77,0.6)'; ctx.lineWidth = 2;
+  ctx.strokeRect(x + 1, y + 1, w - 2, h - 2);
+}
+function drawButton(x, y, w, h, label, onClick, { enabled = true, primary = false, font = 'bold 15px sans-serif' } = {}) {
+  uiButtons.push({ x, y, w, h, onClick, enabled });
+  const hover = enabled && mouse.x >= x && mouse.x <= x + w && mouse.y >= y && mouse.y <= y + h;
+  ctx.fillStyle = !enabled ? '#333a44' : primary ? (hover ? '#ffe07a' : '#ffd34d') : (hover ? '#41698f' : '#2c4b69');
+  ctx.fillRect(x, y, w, h);
+  ctx.strokeStyle = enabled ? 'rgba(255,255,255,0.5)' : 'rgba(255,255,255,0.15)'; ctx.lineWidth = 1;
+  ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+  ctx.fillStyle = !enabled ? '#7a828c' : primary ? '#2a1d00' : '#fff';
+  ctx.font = font; ctx.textAlign = 'center';
+  ctx.fillText(label, x + w / 2, y + h / 2 + 5, w - 8);
+}
+
+function groupCatches(catches) {
+  const groups = new Map();
+  for (const c of catches) {
+    const kind = c.targetKind || c.kind;
+    const key = kind + (c.turtleHit ? ':turtle' : '');
+    if (!groups.has(key)) groups.set(key, { kind, turtleHit: !!c.turtleHit, count: 0, pts: 0, tags: new Set() });
+    const g = groups.get(key);
+    g.count += c.count || 1;
+    g.pts += c.pts;
+    for (const t of c.tags || []) {
+      const name = t.split(' ')[0];
+      if (name !== 'Repeat' && name !== 'Turtle') g.tags.add(name);
+    }
+  }
+  return [...groups.values()].sort((a, b) => b.pts - a.pts);
+}
+const catchName = g => g.kind === 'buzzard' ? 'Buzzard' : HAZARD_NAME[g.kind] ?? SPECIES[g.kind].name;
+
+function drawRecap() {
+  const r = state.recap;
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  ctx.fillRect(0, 0, W, H);
+  const groups = groupCatches(r.catches);
+  const rowH = 40, pw = Math.min(W - 40, 640);
+  const fixedH = 250 + r.records.length * 22;
+  const maxRows = Math.max(1, Math.floor((H - 40 - fixedH) / rowH));
+  const rows = [...groups.map(g => ({ g })), ...r.steals.map(s => ({ s }))].slice(0, maxRows);
+  const ph = fixedH + Math.max(1, rows.length) * rowH;
+  const x0 = (W - pw) / 2, y0 = Math.max(20, (H - ph) / 2);
+  drawPanel(x0, y0, pw, ph);
+
+  ctx.textAlign = 'center';
+  const ended = { crash: 'Crashed', cat: 'Caught by a cat', hunter: 'Shot by a hunter', hawk: 'Taken by a goshawk' }[r.reason];
+  ctx.fillStyle = ended ? '#ff7766' : '#ffd34d';
+  ctx.font = 'bold 28px sans-serif';
+  ctx.fillText(`Day ${r.day} — ${ended ? `${ended} at ${r.clock}` : 'Sunset'}`, W / 2, y0 + 42);
+  const count = r.catches.reduce((n, c) => n + (c.count || 1), 0);
+  ctx.fillStyle = '#cfe6f7'; ctx.font = '14px sans-serif';
+  ctx.fillText(`${count} catch${count === 1 ? '' : 'es'}  ·  top speed ${r.topSpeed} km/h  ·  best chain ×${r.bestChain.toFixed(1)}`, W / 2, y0 + 68);
+
+  let y = y0 + 92;
+  if (!rows.length) {
+    ctx.fillStyle = '#aab'; ctx.font = 'italic 15px sans-serif';
+    ctx.fillText('No catches today. The early bird gets the rabbit…', W / 2, y + 24);
+  }
+  for (const row of rows) {
+    const g = row.g || { kind: row.s.targetKind || row.s.kind, turtleHit: row.s.turtleHit, count: row.s.count || 1, pts: row.s.pts };
+    ctx.globalAlpha = row.s ? 0.55 : 1;
+    drawCatchIcon(g.kind, x0 + 36, y + rowH / 2, 15, g.turtleHit);
+    ctx.textAlign = 'left';
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 16px sans-serif';
+    const label = row.s ? `Stolen by a buzzard: ${catchName(g)}` : `${catchName(g)}${g.turtleHit ? ' (turtle strike)' : ''}  ×${g.count}`;
+    ctx.fillText(label, x0 + 62, y + (row.s ? 25 : 19));
+    if (row.g && g.tags.size) {
+      ctx.fillStyle = '#9fd8ff'; ctx.font = '11px sans-serif';
+      ctx.fillText([...g.tags].join(' · '), x0 + 62, y + 34);
+    }
+    ctx.textAlign = 'right';
+    ctx.font = 'bold 17px monospace';
+    ctx.fillStyle = row.s ? '#ff8877' : '#ffdd55';
+    const amt = row.s ? `-$${g.pts}` : `$${g.pts}`;
+    ctx.fillText(amt, x0 + pw - 24, y + 26);
+    if (row.s) {
+      const aw = ctx.measureText(amt).width;
+      ctx.strokeStyle = '#ff8877'; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.moveTo(x0 + pw - 24 - aw, y + 21); ctx.lineTo(x0 + pw - 24, y + 21); ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+    y += rowH;
+  }
+  if (!rows.length) y += rowH;
+
+  y += 8;
+  ctx.strokeStyle = 'rgba(255,255,255,0.25)'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(x0 + 20, y); ctx.lineTo(x0 + pw - 20, y); ctx.stroke();
+  const shown = Math.round(r.earned * Math.min(1, uiT / 1.2));
+  ctx.textAlign = 'left'; ctx.fillStyle = '#fff'; ctx.font = 'bold 20px sans-serif';
+  ctx.fillText('Day earnings', x0 + 24, y + 34);
+  ctx.textAlign = 'right'; ctx.fillStyle = '#ffd34d'; ctx.font = 'bold 28px monospace';
+  ctx.fillText(`$${shown}`, x0 + pw - 24, y + 36);
+  ctx.textAlign = 'left'; ctx.fillStyle = '#cfe6f7'; ctx.font = '14px sans-serif';
+  ctx.fillText(`Wallet: $${r.walletBefore + shown}`, x0 + 24, y + 60);
+  y += 72;
+  ctx.fillStyle = '#7fd67f'; ctx.font = 'bold 14px sans-serif';
+  for (const rec of r.records) { ctx.fillText(`★ ${rec}`, x0 + 24, y + 10); y += 22; }
+
+  drawButton(W / 2 - 110, y0 + ph - 54, 220, 38, 'Go to the roost →', showShop, { primary: true });
+}
+
+function drawShop() {
+  ctx.fillStyle = 'rgba(4,8,16,0.82)';
+  ctx.fillRect(0, 0, W, H);
+  ctx.textAlign = 'center'; ctx.fillStyle = '#ffd34d'; ctx.font = 'bold 32px sans-serif';
+  ctx.fillText('The Roost', W / 2, 46);
+  ctx.fillStyle = '#cfe6f7'; ctx.font = '14px sans-serif';
+  ctx.fillText(`Spend your earnings, then head out for day ${progress.day}`, W / 2, 70);
+  ctx.textAlign = 'right'; ctx.fillStyle = '#ffd34d'; ctx.font = 'bold 26px monospace';
+  ctx.fillText(`$${progress.money}`, W - 24, 46);
+  ctx.fillStyle = '#aab'; ctx.font = '12px sans-serif';
+  ctx.fillText('wallet', W - 24, 64);
+
+  const cols = W >= 1080 ? 3 : W >= 720 ? 2 : 1, gap = 12;
+  const cw = Math.min(340, (W - 40 - (cols - 1) * gap) / cols);
+  const list = shopUpgrades();
+  const rowsN = Math.ceil(list.length / cols);
+  const ch = clamp((H - 170 - (rowsN - 1) * gap) / rowsN, 70, 100);
+  const gx = (W - (cols * cw + (cols - 1) * gap)) / 2, gy = 90;
+  list.forEach((u, i) => {
+    const x = gx + (i % cols) * (cw + gap), y = gy + Math.floor(i / cols) * (ch + gap);
+    const t = tier(u.id), costs = upgradeCosts(u), maxed = t >= costs.length;
+    ctx.fillStyle = 'rgba(20,32,50,0.95)'; ctx.fillRect(x, y, cw, ch);
+    ctx.strokeStyle = maxed ? 'rgba(127,214,127,0.6)' : 'rgba(255,255,255,0.2)'; ctx.lineWidth = 1;
+    ctx.strokeRect(x + 0.5, y + 0.5, cw - 1, ch - 1);
+    ctx.textAlign = 'left'; ctx.fillStyle = '#fff'; ctx.font = 'bold 15px sans-serif';
+    ctx.fillText(u.name, x + 12, y + 21);
+    // Tier pips
+    for (let k = 0; k < costs.length; k++) {
+      ctx.fillStyle = k < t ? '#ffd34d' : 'rgba(255,255,255,0.18)';
+      ctx.beginPath(); ctx.arc(x + cw - 16 - (costs.length - 1 - k) * 14, y + 16, 5, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.fillStyle = '#9aa7b8'; ctx.font = '11px sans-serif';
+    ctx.fillText(u.desc, x + 12, y + 38, cw - 24);
+    const textW = cw - 112;
+    ctx.fillStyle = '#e8eef5'; ctx.font = '12px sans-serif';
+    ctx.fillText(`Now: ${u.stat(t)}`, x + 12, y + ch - 30, textW);
+    if (!maxed) {
+      ctx.fillStyle = '#7fd67f';
+      ctx.fillText(`Next: ${u.stat(t + 1)}`, x + 12, y + ch - 12, textW);
+    }
+    const cost = maxed ? 0 : costs[t];
+    drawButton(x + cw - 92, y + ch - 38, 80, 28, maxed ? 'MAXED' : `$${cost}`, () => buyUpgrade(u.id),
+               { enabled: !maxed && progress.money >= cost, primary: !maxed, font: 'bold 14px monospace' });
+  });
+
+  drawButton(W / 2 - 120, H - 62, 240, 42, `Start day ${progress.day} →`, startDay, { primary: true, font: 'bold 17px sans-serif' });
+  drawButton(16, H - 50, 150, 30, confirmReset ? 'Click again to wipe' : 'Reset progress',
+             () => { if (confirmReset) resetProgress(); else confirmReset = true; }, { font: '12px sans-serif' });
+  if (progress.best.earned > 0) {
+    ctx.textAlign = 'right'; ctx.fillStyle = '#9aa7b8'; ctx.font = '12px sans-serif';
+    ctx.fillText(`Best day $${progress.best.earned}  ·  top speed ${progress.best.speed} km/h`, W - 16, H - 30);
+  }
+}
+
 function draw() {
+  uiButtons = [];
   ctx.save();
   if (!state.over && !paused && cam.shake > 0) {
     ctx.translate((Math.random() - 0.5) * cam.shake, (Math.random() - 0.5) * cam.shake);
@@ -2740,14 +4607,25 @@ function draw() {
   drawThermals();
   drawDetectionZones();
   prey.forEach(drawPrey);
+  drawHazardsBehind();
   drawGrass();
+  drawHazardsFront();
   drawFallers();
   drawRivals();
   drawSoundRings();
   ctx.fillStyle = '#ccc';
   for (const p of particles) ctx.fillRect(toScreenX(p.x), toScreenY(p.alt), 3, 3);
   drawCrashSmoke();
+  drawEyases();
+  drawFeatherFx();
   if (!state.over) drawBird();
+  if (bird.inWater) {
+    // Water over the submerged bird
+    const l = bird.inWater, gy = toScreenY(0);
+    ctx.fillStyle = 'rgba(40,90,140,0.35)';
+    ctx.fillRect(toScreenX(l.x0), gy, toScreenX(l.x0 + l.w) - toScreenX(l.x0), toScreenY(-l.depth) - gy);
+    if (!state.over) drawBreath(toScreenX(bird.x), toScreenY(bird.alt) - 26);
+  }
   ctx.restore();
   drawAtmosphere();
   // Whiteout while flying through a cloud
@@ -2766,15 +4644,20 @@ function draw() {
   drawClosingHint();
   drawBirdLens();
   drawSunIndicator();
+  if (screen === 'hunt') drawHazardWarnings();
   if (state.crash && state.crash.t >= CRASH_REVEAL_DELAY) {
     ctx.fillStyle = `rgba(0,0,0,${Math.min(1, (state.crash.t - CRASH_REVEAL_DELAY) / 0.5) * 0.35})`;
     ctx.fillRect(0, 0, W, H);
   }
-  drawHUD();
-  if (paused) {
-    drawPausePanel();
+  if (screen === 'hunt') {
+    drawHUD();
+    if (paused) drawPausePanel();
+    if (!state.over) drawPauseButton();
+  } else if (screen === 'recap') {
+    drawRecap();
+  } else {
+    drawShop();
   }
-  if (!state.over) drawPauseButton();
 }
 
 // ---------- Loop ----------
@@ -2788,10 +4671,13 @@ function loop(now) {
   const slow = !paused && !state.over && (bird.mode === 'BRAKE' || (mouse.aiming && bird.carrying));
   timeScale += ((slow ? SLOWMO_SCALE : 1) - timeScale) * Math.min(1, dt * 6);
   update(dt * timeScale);
+  if (screen !== 'hunt') uiT += dt;
   draw();
   requestAnimationFrame(loop);
 }
 reset();
+// Returning players start in the roost so they can spend what they earned last session
+if (progress.day > 1) showShop();
 requestAnimationFrame(loop);
 </script>
 </body>
