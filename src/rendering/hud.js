@@ -438,6 +438,7 @@ export function createHud({ session, viewport, systems }) {
     if (c.eyas) items.push({ id: 'eyas', icon: '🐣', label: 'Eyas' });
     if (c.crossfire) items.push(c.by === 'cat'
       ? { id: 'cat', icon: '🐈', label: 'Caught by cat' }
+      : c.by === 'buzzard' ? { id: 'buzzard', icon: '🦅', label: 'Shot by buzzard' }
       : { id: 'hunter', icon: '🎯', label: 'Shot by hunter' });
     if (c.stolenBy === 'buzzard') items.push({ id: 'buzzard', icon: '🦅', label: 'Stolen by buzzard' });
     return items;

@@ -5,6 +5,8 @@ export function createInput({ session, viewport, systems }) {
   session.mouse = { x: viewport.W / 2, y: viewport.H / 2, down: false, sliderDrag: false, sliderKind: null, aiming: false, talonTarget: null, throwHeld: false, steer: null };
   const inPauseBtn = (x, y) =>
     x >= PAUSE_BTN.x && x <= PAUSE_BTN.x + PAUSE_BTN.w && y >= PAUSE_BTN.y && y <= PAUSE_BTN.y + PAUSE_BTN.h;
+  const talonsOut = () => session.screen === 'hunt' && !session.paused && !session.state.over &&
+    session.mouse.aiming && !session.mouse.throwHeld && !session.bird.carrying;
   function cancelAim() {
     session.mouse.aiming = false;
     session.mouse.throwHeld = false;
@@ -56,12 +58,9 @@ export function createInput({ session, viewport, systems }) {
           session.mouse.steer = session.bird.carrying.kind === 'gun' && systems.combat.gunFreeAim() ? { dx: session.mouse.x - a.x, dy: session.mouse.y - a.y } : null;
           return;
         }
-        const target = systems.prey.nearestFallingTurtle();
-        if (target) {
-          session.mouse.aiming = true;
-          session.mouse.throwHeld = false;
-          session.mouse.talonTarget = target;
-        }
+        session.mouse.aiming = true;
+        session.mouse.throwHeld = false;
+        session.mouse.talonTarget = systems.prey.nearestFallingTurtle();
         return;
       }
       if (e.button === 0) {
@@ -103,5 +102,5 @@ export function createInput({ session, viewport, systems }) {
     }, options);
     addEventListener('blur', () => { if (!session.state.over) session.paused = true; session.mouse.down = false; cancelAim(); session.mouse.sliderDrag = false; session.mouse.sliderKind = null; }, options);
   }
-  return { bindInput, inPauseBtn };
+  return { bindInput, inPauseBtn, talonsOut };
 }

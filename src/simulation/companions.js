@@ -16,14 +16,15 @@ export function createCompanions({ session, viewport, systems }) {
     session.state.rings.push({ x: e.x, alt: e.alt, t: 0, r: 40, kind: 'shot' });
     for (let i = 0; i < 8; i++) session.particles.push({ x, alt: Math.max(0.5, alt), vx: (Math.random() - 0.5) * 10, vy: Math.random() * 7, life: 0.7 });
   }
-  // Escort duty: shoot a hunter about to fire at you, or a goshawk stooping on you
+  // Escort duty: interrupt a shooter or a stooping goshawk.
   function eyasGuard(e, range) {
-    for (const h of session.state.hazards.hunters) {
-      if (h.gone || !(h.aim > 0 || h.lock > 0.5) || Math.hypot(h.x - e.x, 1.6 - e.alt) > range * 1.3) continue;
-      eyasShoot(e, h.x, 1.6);
-      systems.prey.award({ kind: 'turtle', speed: 0, targetKind: 'hunter', stolen: true, shot: true, eyas: true },
-            systems.session.priceCatch('hunter', { share: EYAS_SHARE }), 'Your eyas shot the hunter aiming at you!');
-      systems.prey.removeHazard('hunter', h);
+    for (const h of [...session.state.hazards.hunters, ...session.state.rivals.filter(r => r.gun?.ammo > 0)]) {
+      const alt = systems.hazards.shotAltitude(h), kind = h.gun ? 'buzzard' : 'hunter';
+      if (h.gone || !(h.aim > 0 || h.lock > 0.5) || Math.hypot(h.x - e.x, alt - e.alt) > range * 1.3) continue;
+      eyasShoot(e, h.x, alt);
+      systems.prey.award({ kind: 'turtle', speed: 0, targetKind: kind, stolen: true, shot: true, eyas: true },
+            systems.session.priceCatch(kind, { share: EYAS_SHARE }), `Your eyas shot the ${kind} aiming at you!`);
+      systems.prey.removeHazard(kind, h);
       return true;
     }
     const hk = session.state.hazards.hawk;

@@ -415,6 +415,7 @@ export function createFlight({ session, viewport, systems }) {
     systems.companions.updateFeathers(dt);
     systems.world.updateWeather(dt);
     systems.hazards.updateRivals(dt);
+    if (session.state.over) return;
     systems.hazards.updateHazards(dt);
     if (session.state.over) return;
     systems.prey.spawnPreyAhead();

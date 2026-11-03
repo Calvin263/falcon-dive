@@ -46,7 +46,10 @@ Existing `falconDive.progress` and `falconDive.settings` storage keys and legacy
 - Recent catches show their name, earnings, and applied modifiers in a compact, wrapping upper-screen panel for four seconds. Flock combos update the same panel; warnings and unlock banners remain separate. Full catch history stays in the catch log/recap. Eyas calls update the status badge.
 - Gameplay notices wrap near the top of the screen. Achievement and unlock banners queue without replacing an active banner; repeated queued notices are deduplicated.
 - Hold right-click to aim after buying Turtle Aim; left-click while aiming cancels the action and brakes without releasing the carried item. Intact turtles can be picked up as soon as they land. Land animals turn back at lake shores; ducks can paddle.
-- Undiscovered secrets are omitted from achievement lists and progression hints rather than shown as locked goals.
+- Holding right-click empty-handed extends the falcon's gold talons, even with no nearby target. Release or brake to retract them.
+- Achievement counters include every achievement, including hidden ones. Unachieved hidden achievements show their names and "hidden achievement" as their description; actual descriptions and rewards are revealed afterward. Progression hints still omit undiscovered secrets.
+- A buzzard that steals a loaded rifle can turn its remaining ammunition against you. Its shots have hunter-style aiming warnings and can be dodged or parried; defeating it drops the rifle. The first shot unlocks a hidden achievement.
+- Cats prefer a pursuing goshawk within pounce range over the player, and can switch targets while crouching. A leap already underway stays committed.
 
 ## Verify
 

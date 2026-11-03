@@ -55,11 +55,12 @@ export const ACHIEVEMENTS = [
   { id: 'tables', name: 'Turn the Tables', desc: 'Take out a hunter', reward: 50 },
   { id: 'skeet', name: 'Pull!', desc: 'Shoot a turtle out of the air', reward: 50, hidden: true },
   { id: 'drownedTurtle', name: 'Sink or Shell', desc: 'Drop a turtle into a lake', reward: 75, hidden: true },
+  { id: 'armedBuzzard', name: 'This Was a Mistake', desc: 'Have a buzzard fire your stolen rifle at you', reward: 100, hidden: true },
   { id: 'stoop', name: 'Terminal Velocity', desc: 'Catch prey at 300+ km/h', reward: 60 },
   { id: 'chain', name: 'Chain Reaction', desc: `Reach a ×${CHAIN_MAX.toFixed(1)} chain`, reward: 60 },
   { id: 'below', name: 'From the Deep', desc: 'Catch a duck from underwater', reward: 60 },
   { id: 'buzzsaw', name: 'Buzzsaw', desc: 'Take something out while spinning', reward: 50, hidden: true },
-  { id: 'parry', name: 'Parry', desc: 'Deflect a hunter\'s bullet with the buzzsaw spin', reward: 120, hidden: true },
+  { id: 'parry', name: 'Parry this you filthy casual!', desc: 'Deflect a bullet with the buzzsaw spin', reward: 120, hidden: true },
   { id: 'xhawk', name: 'Friendly Fire', desc: 'Lead the goshawk hunting you into a hunter\'s shot', reward: 150 },
   { id: 'xcat', name: 'Wrong Target', desc: 'Get a hunter to shoot a cat', reward: 120 },
   { id: 'cathawk', name: 'Cat Among the Hawks', desc: 'Lure the goshawk into a cat\'s pounce', reward: 150 },
@@ -76,8 +77,8 @@ export const STATS = {
   flapMax:    [180, 205, 232, 260, 290],        // km/h flapping speed cap
   stream:     [1, 1.15, 1.32, 1.52, 1.75],      // terminal dive speed multiplier
   agility:    [1, 1.2, 1.4, 1.6, 1.85],
-  brakeDur:   [2.5, 3.4, 4.4, 5.5, 7.0],        // seconds of braking from a full meter
-  brakeRef:   [5.0, 4.2, 3.5, 2.9, 2.4],        // seconds to refill from empty
+  brakeDur:   [1, 1.5, 2, 2.5, 3],        // seconds of braking from a full meter
+  brakeRef:   [12.0, 10.0, 8.0, 6.0, 4.0],        // seconds to refill from empty
   noise:      [1, 0.8, 0.62, 0.47, 0.35],
   // Stealth: prey sight, shadow, and how buzzards treat you
   sight:      [1, 0.85, 0.72, 0.6, 0.5],

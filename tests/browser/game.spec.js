@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { ACHIEVEMENTS } from '../../src/config.js';
 
 test.beforeEach(async ({ page }) => {
   const errors = [];
@@ -298,10 +299,11 @@ test('left-click cancels turtle and gun aiming without throwing or firing', asyn
   }
 });
 
-test('undiscovered secrets are absent from roost and achievements', async ({ page }) => {
-  const capture = async achievements => page.evaluate(showAchievements => {
+test('hidden achievements show placeholder descriptions until earned, without roost hints', async ({ page }) => {
+  const capture = async (achievements, earned = false) => page.evaluate(({ showAchievements, earned }) => {
     const game = window.__falconDiveDebug;
     game.resetProgress();
+    if (earned) game.progress.ach.armedBuzzard = 1;
     game.progress.up.bounce = 4;
     game.showShop();
     game.session.achView = showAchievements;
@@ -312,14 +314,25 @@ test('undiscovered secrets are absent from roost and achievements', async ({ pag
       return original.call(this, label, ...args);
     };
     try { game.render(); } finally { ctx.fillText = original; }
-    return text.join(' ');
-  }, achievements);
+    return text;
+  }, { showAchievements: achievements, earned });
   for (const achievements of [false, true]) {
     const text = await capture(achievements);
-    expect(text).not.toMatch(/moon|grotto|rifle|bazooka|buzzsaw|parry|satellite|sink or shell|Pull!/i);
-    expect(text).not.toMatch(/Find a hunter/);
-    expect(text).not.toMatch(/Achievements \d+\//);
+    const joined = text.join(' ');
+    if (!achievements) expect(joined).not.toMatch(/moon|grotto|rifle|bazooka|buzzsaw|parry|satellite|sink or shell|Pull!/i);
+    else for (const achievement of ACHIEVEMENTS.filter(a => a.hidden)) {
+      expect(text).toContain(achievement.name);
+      expect(text).not.toContain(achievement.desc);
+    }
+    expect(joined).not.toMatch(/Find a hunter/);
+    if (achievements) expect(text.filter(label => label === 'hidden achievement')).toHaveLength(ACHIEVEMENTS.filter(a => a.hidden).length);
+    expect(joined).toContain(achievements ? `0/${ACHIEVEMENTS.length} earned` : `Achievements 0/${ACHIEVEMENTS.length}`);
   }
+  const unlocked = await capture(true, true);
+  const achievement = ACHIEVEMENTS.find(a => a.id === 'armedBuzzard');
+  expect(unlocked).toContain(achievement.desc);
+  expect(unlocked).toContain(`$${achievement.reward}`);
+  expect(unlocked.filter(label => label === 'hidden achievement')).toHaveLength(ACHIEVEMENTS.filter(a => a.hidden).length - 1);
 });
 
 test('braking cancels automatic fire and a pending turtle grab', async ({ page }) => {
@@ -349,6 +362,105 @@ test('braking cancels automatic fire and a pending turtle grab', async ({ page }
     return { ammo, targeted, carrying: game.bird.carrying, target: game.session.mouse.talonTarget };
   });
   expect(result).toEqual({ ammo: 30, targeted: true, carrying: null, target: null });
+});
+
+test('empty-handed right-click shows talons without a target and retracts cleanly', async ({ page }, testInfo) => {
+  const result = await page.evaluate(() => {
+    const game = window.__falconDiveDebug;
+    game.startDay();
+    game.state.fallers = [];
+    const canvas = document.querySelector('#game');
+    const ctx = document.querySelector('#hud-overlay').getContext('2d');
+    const original = ctx.fillText;
+    const text = [];
+    const press = button => canvas.dispatchEvent(new MouseEvent('mousedown', { button, clientX: 200, clientY: 150 }));
+    const release = button => window.dispatchEvent(new MouseEvent('mouseup', { button }));
+    const visible = () => {
+      game.render();
+      return game.session.mouse.aiming && !game.session.mouse.throwHeld &&
+        !game.bird.carrying && !game.session.paused && !game.state.over;
+    };
+    ctx.fillText = function (label, ...args) {
+      text.push(String(label));
+      return original.call(this, label, ...args);
+    };
+    try {
+      const idle = visible();
+      press(2);
+      const held = visible(), target = game.session.mouse.talonTarget;
+      release(2);
+      const released = visible();
+      press(2);
+      press(0);
+      release(0);
+      const braked = visible();
+      release(2);
+      game.bird.carrying = { kind: 'turtle' };
+      press(2);
+      const carrying = visible();
+      release(2);
+      game.bird.carrying = null;
+      press(2);
+      window.dispatchEvent(new Event('blur'));
+      const blurred = visible();
+      game.session.paused = false;
+      game.state.fallers = [];
+      press(2);
+      game.render();
+      return { idle, held, target, released, braked, carrying, blurred, statusText: text.includes('TALONS OUT') };
+    } finally { ctx.fillText = original; }
+  });
+  expect(result).toEqual({ idle: false, held: true, target: null, released: false, braked: false, carrying: false, blurred: false, statusText: false });
+  await page.screenshot({ path: testInfo.outputPath('talons-out.png') });
+});
+
+test('rifle-stealing buzzards show a weapon and aim warning, then earn a hidden achievement on firing', async ({ page }, testInfo) => {
+  const result = await page.evaluate(() => {
+    const game = window.__falconDiveDebug;
+    game.startDay();
+    Object.assign(game.bird, { x: 0, alt: 220, speed: 0, vx: 0, vy: 0, carrying: { kind: 'gun', ammo: 2 } });
+    const buzzard = { x: 1, alt: 220, cx: 1, calt: 220, vx: 0, vy: 0, ang: 0, mode: 'chase', t: 7, flapT: 0 };
+    game.state.rivals = [buzzard];
+    game.step(0.001);
+    const stolen = { carrying: game.bird.carrying, ammo: buzzard.gun?.ammo, mode: buzzard.mode };
+    Object.assign(buzzard, { x: game.bird.x + 45, alt: game.bird.alt, aim: 0.5, ax: game.bird.x, aalt: game.bird.alt, tracer: 0 });
+    Object.assign(game.cam, { x: game.bird.x, alt: game.bird.alt, zoom: 2.5, zoomY: 2.5 });
+    game.session.paused = true;
+    const ctx = document.querySelector('#game').getContext('2d');
+    const textCtx = document.querySelector('#hud-overlay').getContext('2d');
+    const originalRect = ctx.fillRect, originalText = textCtx.fillText;
+    let rifle = false;
+    const text = [];
+    ctx.fillRect = function (x, y, w, h) {
+      if (x === 4 && y === -1.4 && w === 13 && h === 1.6) rifle = true;
+      return originalRect.call(this, x, y, w, h);
+    };
+    textCtx.fillText = function (label, ...args) {
+      text.push(String(label));
+      return originalText.call(this, label, ...args);
+    };
+    try { game.render(); } finally { ctx.fillRect = originalRect; textCtx.fillText = originalText; }
+    return { stolen, rifle, warning: text.includes('BUZZARD AIMING — DODGE!'), achievement: !!game.progress.ach.armedBuzzard };
+  });
+  expect(result).toEqual({ stolen: { carrying: null, ammo: 2, mode: 'armed' }, rifle: true, warning: true, achievement: false });
+  await page.screenshot({ path: testInfo.outputPath('armed-buzzard-aiming.png') });
+  const shot = await page.evaluate(() => {
+    const game = window.__falconDiveDebug, buzzard = game.state.rivals[0];
+    game.session.paused = false;
+    buzzard.aim = 0.001;
+    game.step(0.01);
+    game.showRecap();
+    game.render();
+    return { ammo: buzzard.gun.ammo, reason: game.state.recap.reason,
+      earned: game.progress.ach.armedBuzzard,
+      saved: JSON.parse(localStorage.getItem('falconDive.progress')).ach.armedBuzzard,
+      records: game.state.recap.records.join(' ') };
+  });
+  expect(shot.ammo).toBe(1);
+  expect(shot.reason).toBe('buzzard');
+  expect(shot.earned).toBe(shot.saved);
+  expect(shot.earned).toBeGreaterThan(0);
+  expect(shot.records).toContain('This Was a Mistake');
 });
 
 test('catch cards show circumstance icons and recap keeps different kill methods separate', async ({ page }, testInfo) => {

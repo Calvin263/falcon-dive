@@ -77,7 +77,8 @@ export function createCombat({ session, viewport, systems }) {
       }
     } else if (hit.type === 'buzzard') {
       const r = hit.r;
-      r.gone = true; r.mode = 'leave';
+      systems.prey.removeHazard('buzzard', r);
+      r.mode = 'leave';
       systems.prey.award({ kind: 'turtle', speed: session.bird.speed, targetKind: 'buzzard', stolen: true, shot, method }, systems.session.priceCatch('buzzard', {}), `${verb} Buzzard`);
     } else if (hit.type === 'skeet') {
       hit.f.done = true;
@@ -365,13 +366,10 @@ export function createCombat({ session, viewport, systems }) {
     // Marked stolen so a buzzard can't steal it back
     const e = systems.prey.award({ kind: 'turtle', speed: impact, turtleHit: true, buzzard: true, targetKind: 'buzzard', stolen: true },
                     systems.session.priceCatch('buzzard', { impact }), 'TURTLE STRIKE! Buzzard');
-    r.gone = true;
+    systems.prey.removeHazard('buzzard', r);
     r.mode = 'leave'; r.t = 4; r.alertT = 0.8;
     f.struck = true;
     f.hitBuzzard = true;
-    for (let i = 0; i < 20; i++) session.particles.push({
-      x: r.x, alt: r.alt, vx: (Math.random() - 0.5) * 18, vy: Math.random() * 12, life: 1.1
-    });
     ricochet(f);
   }
 

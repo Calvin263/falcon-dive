@@ -52,7 +52,7 @@ export function createScreens({ session, viewport, systems }) {
     drawPanel(x0, y0, pw, ph);
 
     viewport.ctx.textAlign = 'center';
-    const ended = { crash: 'Crashed', cat: 'Caught by a cat', hunter: 'Shot by a hunter', hawk: 'Taken by a goshawk', octopus: 'Grabbed by the octopus', drown: 'Drowned' }[r.reason];
+    const ended = { crash: 'Crashed', cat: 'Caught by a cat', hunter: 'Shot by a hunter', buzzard: 'Shot by a buzzard', hawk: 'Taken by a goshawk', octopus: 'Grabbed by the octopus', drown: 'Drowned' }[r.reason];
     viewport.ctx.fillStyle = r.reason === 'moon' ? '#ffd34d' : ended ? '#ff7766' : '#ffd34d';
     viewport.ctx.font = 'bold 28px sans-serif';
     viewport.ctx.fillText(r.reason === 'moon' ? `Day ${r.day} — 🌕 Reached the moon at ${r.clock}` : `Day ${r.day} — ${ended ? `${ended} at ${r.clock}` : 'Sunset'}`, viewport.W / 2, y0 + 42);
@@ -166,12 +166,12 @@ export function createScreens({ session, viewport, systems }) {
       const utilityY = viewport.H - 50, utilityWidth = (viewport.W - 48) / 2;
       drawButton(16, utilityY, utilityWidth, 32, session.confirmReset ? 'Click again to wipe' : 'Reset progress',
                  () => { if (session.confirmReset) systems.session.resetProgress(); else session.confirmReset = true; }, { font: '12px sans-serif' });
-      drawButton(32 + utilityWidth, utilityY, utilityWidth, 32, `Achievements ${got}`, () => { session.achView = true; }, { font: 'bold 12px sans-serif' });
+      drawButton(32 + utilityWidth, utilityY, utilityWidth, 32, `Achievements ${got}/${ACHIEVEMENTS.length}`, () => { session.achView = true; }, { font: 'bold 12px sans-serif' });
     } else {
       drawButton(viewport.W / 2 - 120, viewport.H - 62, 240, 42, `Start day ${session.progress.day} →`, systems.session.startDay, { primary: true, font: 'bold 17px sans-serif', id: 'startDay' });
       drawButton(16, viewport.H - 50, 150, 30, session.confirmReset ? 'Click again to wipe' : 'Reset progress',
                  () => { if (session.confirmReset) systems.session.resetProgress(); else session.confirmReset = true; }, { font: '12px sans-serif' });
-      drawButton(viewport.W - 196, viewport.H - 50, 180, 30, `🏆 Achievements ${got}`, () => { session.achView = true; }, { font: 'bold 13px sans-serif' });
+      drawButton(viewport.W - 196, viewport.H - 50, 180, 30, `🏆 Achievements ${got}/${ACHIEVEMENTS.length}`, () => { session.achView = true; }, { font: 'bold 13px sans-serif' });
     }
     if (!narrow && session.progress.best.earned > 0) {
       viewport.ctx.textAlign = 'right'; viewport.ctx.fillStyle = '#9aa7b8'; viewport.ctx.font = '12px sans-serif';
@@ -206,7 +206,7 @@ export function createScreens({ session, viewport, systems }) {
     viewport.ctx.textAlign = 'center'; viewport.ctx.fillStyle = '#ffd34d'; viewport.ctx.font = 'bold 24px sans-serif';
     viewport.ctx.fillText('Achievements', viewport.W / 2, y0 + 36);
     viewport.ctx.fillStyle = '#cfe6f7'; viewport.ctx.font = '13px sans-serif';
-    viewport.ctx.fillText(`${got.length} earned  ·  $${got.reduce((s, a) => s + a.reward, 0)} in rewards`, viewport.W / 2, y0 + 56);
+    viewport.ctx.fillText(`${got.length}/${ACHIEVEMENTS.length} earned  ·  $${got.reduce((s, a) => s + a.reward, 0)} in rewards`, viewport.W / 2, y0 + 56);
     const species = Object.keys(SPECIES), caught = species.filter(k => session.progress.caught[k]).length;
     list.forEach((a, i) => {
       const x = x0 + 20 + (i % cols) * (cw + gap), y = y0 + 70 + Math.floor(i / cols) * rowH;
@@ -214,17 +214,18 @@ export function createScreens({ session, viewport, systems }) {
       viewport.ctx.fillStyle = day ? 'rgba(255,211,77,0.12)' : 'rgba(255,255,255,0.04)'; viewport.ctx.fillRect(x, y, cw, rowH - 6);
       viewport.ctx.textAlign = 'left'; viewport.ctx.font = '20px sans-serif';
       viewport.ctx.globalAlpha = day ? 1 : 0.35;
-      viewport.ctx.fillText(day ? '🏆' : '🔒', x + 8, y + 27);
+      viewport.ctx.fillText(day ? '🏆' : '🔒', x + 8, y + rowH / 2 + 5);
       viewport.ctx.globalAlpha = 1;
       viewport.ctx.fillStyle = day ? '#ffd34d' : '#e8eef5'; viewport.ctx.font = 'bold 14px sans-serif';
-      viewport.ctx.fillText(a.name, x + 40, y + 17);
+      const secret = a.hidden && !day;
+      viewport.ctx.fillText(a.name, x + 40, y + 14, cw - (secret ? 50 : 110));
       viewport.ctx.fillStyle = '#9aa7b8'; viewport.ctx.font = '11px sans-serif';
       const extra = a.id === 'naturalist' && !day ? `  (${caught}/${species.length})` : '';
-      viewport.ctx.fillText(a.desc + extra, x + 40, y + 33, cw - 120);
+      viewport.ctx.fillText(a.desc + extra, x + 40, y + rowH - 10, cw - (secret ? 50 : 120));
       viewport.ctx.textAlign = 'right'; viewport.ctx.font = 'bold 13px monospace';
       viewport.ctx.fillStyle = day ? '#7fd67f' : '#ffdd55';
-      viewport.ctx.fillText(`$${a.reward}`, x + cw - 10, y + 17);
-      if (day) { viewport.ctx.fillStyle = '#9aa7b8'; viewport.ctx.font = '10px sans-serif'; viewport.ctx.fillText(day > 0 ? `day ${day}` : 'earned', x + cw - 10, y + 32); }
+      if (!secret) viewport.ctx.fillText(`$${a.reward}`, x + cw - 10, y + 14);
+      if (day) { viewport.ctx.fillStyle = '#9aa7b8'; viewport.ctx.font = '10px sans-serif'; viewport.ctx.fillText(day > 0 ? `day ${day}` : 'earned', x + cw - 10, y + rowH - 10); }
     });
     drawButton(viewport.W / 2 - 70, y0 + ph - 44, 140, 32, 'Back', () => { session.achView = false; }, { primary: true });
   }

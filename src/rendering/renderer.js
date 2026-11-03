@@ -1,4 +1,4 @@
-import { DIVE_SPEED, CRASH_REVEAL_DELAY, THROW_LOCK_AIR, SHADOW_VISIBLE_ALT, HILL_SCROLL, LENS_R, DUST_DEVILS_ENABLED, HAZARD_BOUNTY, HAZARD_NAME, CATSENSE, SPIN_R, MOONSHOT_T, SPECIES, FALCON_SCALE, THERMAL_SPACING, RIDGE_SPACING, LAKE_SPACING, ROCKET_BLAST, CAT_REACH, CAT_ALT, HUNTER_AIM_T, GROTTO_L, GROTTO_H, GROTTO_VENTS, VENT_R, OCTO_HP, OCTO_REACH, OCTO_HEAD_R, OUTLINE, SIGHT_COLOR, HEARING_COLOR, NO_SENSE_RANGE, IGNORE_DETECTION, GUN_MUZZLE, GRASS_COLORS, EYAS_S, HAZARD_SCALE } from '../config.js';
+import { DIVE_SPEED, CRASH_REVEAL_DELAY, THROW_LOCK_AIR, SHADOW_VISIBLE_ALT, HILL_SCROLL, LENS_R, DUST_DEVILS_ENABLED, HAZARD_BOUNTY, HAZARD_NAME, CATSENSE, SPIN_R, MOONSHOT_T, SPECIES, FALCON_SCALE, THERMAL_SPACING, RIDGE_SPACING, LAKE_SPACING, ROCKET_BLAST, CAT_REACH, CAT_ALT, HUNTER_AIM_T, HUNTER_RANGE, GROTTO_L, GROTTO_H, GROTTO_VENTS, VENT_R, OCTO_HP, OCTO_REACH, OCTO_HEAD_R, OUTLINE, SIGHT_COLOR, HEARING_COLOR, NO_SENSE_RANGE, IGNORE_DETECTION, GUN_MUZZLE, GRASS_COLORS, EYAS_S, HAZARD_SCALE } from '../config.js';
 import { clamp, wrapAngle, mixRGB, rgb, hash } from '../core/math.js';
 
 export function createRenderer({ session, viewport, systems }) {
@@ -750,10 +750,11 @@ export function createRenderer({ session, viewport, systems }) {
     else { span = 18 - effort * 6; sweep = -6 - effort * 4; }
     span = Math.round(span * 2) / 2;
     sweep = Math.round(sweep * 2) / 2;
-    const image = systems.sprites.cached(`falcon|${span}|${sweep}`, 2, () => {
+    const talons = systems.input.talonsOut();
+    const image = systems.sprites.cached(`falcon|${span}|${sweep}|${talons ? 1 : 0}`, 2, () => {
       viewport.ctx.save();
       viewport.ctx.scale(2, 2);
-      drawBirdShape(span, sweep);
+      drawBirdShape(span, sweep, talons);
       viewport.ctx.restore();
     });
     viewport.ctx.save();
@@ -765,12 +766,32 @@ export function createRenderer({ session, viewport, systems }) {
     viewport.ctx.restore();
   }
 
-  function drawBirdShape(span, sweep) {
+  function drawBirdShape(span, sweep, talons) {
     viewport.ctx.fillStyle = '#4a4a52';
     // wings
     viewport.ctx.beginPath();
     viewport.ctx.moveTo(4, 0); viewport.ctx.lineTo(sweep, -span); viewport.ctx.lineTo(-6, 0);
     viewport.ctx.lineTo(sweep, span); viewport.ctx.closePath(); viewport.ctx.fill();
+    if (talons) {
+      viewport.ctx.strokeStyle = '#f2c230'; viewport.ctx.lineWidth = 2; viewport.ctx.lineCap = 'round';
+      for (const side of [-1, 1]) {
+        viewport.ctx.beginPath();
+        viewport.ctx.moveTo(2, side * 2);
+        viewport.ctx.lineTo(9, side * 8);
+        viewport.ctx.lineTo(15, side * 8);
+        viewport.ctx.stroke();
+        viewport.ctx.strokeStyle = '#fff1b8'; viewport.ctx.lineWidth = 1.4;
+        for (const toe of [-1, 0, 1]) {
+          viewport.ctx.beginPath();
+          viewport.ctx.moveTo(14, side * 8);
+          viewport.ctx.lineTo(18, side * 8 + toe * 3);
+          viewport.ctx.lineTo(19, side * 8 + toe * 3 - side * 2);
+          viewport.ctx.stroke();
+        }
+        viewport.ctx.strokeStyle = '#f2c230'; viewport.ctx.lineWidth = 2;
+      }
+      viewport.ctx.lineCap = 'butt';
+    }
     // body
     viewport.ctx.fillStyle = '#2f2f36';
     viewport.ctx.beginPath(); viewport.ctx.ellipse(0, 0, 12, 4, 0, 0, Math.PI * 2); viewport.ctx.fill();
@@ -915,7 +936,14 @@ export function createRenderer({ session, viewport, systems }) {
       if (r.gone) continue;
       const x = systems.flight.toScreenX(r.x), y = systems.flight.toScreenY(r.alt);
       if (x < -60 || x > viewport.W + 60 || y < -60 || y > viewport.H + 60) continue;
-      drawBuzzard(x, y, r, 1.5 * systems.progression.spriteK());
+      const scale = 1.5 * systems.progression.spriteK();
+      if (r.gun) {
+        const angle = r.tracking || r.aim > 0
+          ? Math.atan2(-(r.aalt - r.alt) * session.cam.zoomY, (r.ax - r.x) * session.cam.zoom)
+          : r.vx < 0 ? Math.PI : 0;
+        drawRifle(x, y + 7 * scale, angle, scale, 0, r.flash || 0);
+      }
+      drawBuzzard(x, y, r, scale);
     }
     viewport.ctx.filter = 'none';
     for (const r of session.state.rivals) if (!r.gone && r.alertT > 0) systems.sprites.drawAlert(systems.flight.toScreenX(r.x), systems.flight.toScreenY(r.alt) - 24);
@@ -1084,16 +1112,18 @@ export function createRenderer({ session, viewport, systems }) {
       viewport.ctx.filter = 'none';
       if (c.alertT > 0) systems.sprites.drawAlert(x, systems.flight.toScreenY(c.alt) - 30, '!', 1, 'sight');
     }
-    for (const h of hz.hunters) {
+    for (const h of [...hz.hunters, ...session.state.rivals.filter(r => r.gun)]) {
+      if (h.gone) continue;
       if (session.state.over && !(h.tracer > 0)) continue;
-      const x = systems.flight.toScreenX(h.x), y = gy - 25 * hazardScale();
+      const originAlt = systems.hazards.shotAltitude(h);
+      const x = systems.flight.toScreenX(h.x), y = h.gun ? systems.flight.toScreenY(originAlt) : gy - 25 * hazardScale();
       // The shot line, extended well past the aim point
-      const shotEnd = (n = 600) => {
-        const dx = h.ax - h.x, dy = h.aalt - 1.6, len = Math.hypot(dx, dy) || 1;
-        return [systems.flight.toScreenX(h.x + dx / len * n), systems.flight.toScreenY(1.6 + dy / len * n)];
+      const shotEnd = (n = h.gun ? HUNTER_RANGE : 600) => {
+        const dx = h.ax - h.x, dy = h.aalt - originAlt, len = Math.hypot(dx, dy) || 1;
+        return [systems.flight.toScreenX(h.x + dx / len * n), systems.flight.toScreenY(originAlt + dy / len * n)];
       };
       if (h.tracer > 0) {
-        const [ex, ey] = shotEnd(h.tracerLen || 600);
+        const [ex, ey] = shotEnd(h.tracerLen || (h.gun ? HUNTER_RANGE : 600));
         viewport.ctx.strokeStyle = `rgba(255,230,140,${h.tracer / 0.3})`; viewport.ctx.lineWidth = 3;
         viewport.ctx.beginPath(); viewport.ctx.moveTo(x, y); viewport.ctx.lineTo(ex, ey); viewport.ctx.stroke();
         continue;
@@ -1163,6 +1193,7 @@ export function createRenderer({ session, viewport, systems }) {
     const lock = Math.max(0, ...hs.filter(x => x.tracking && x.reload <= 0).map(x => x.lock));
     if (lock > 0.35) warn = 'HUNTER TRACKING YOU — fly faster or get out of range!';
     if (hs.some(x => x.aim > 0)) warn = 'HUNTER AIMING — change course NOW!';
+    if (session.state.rivals.some(r => !r.gone && r.gun && r.aim > 0)) warn = 'BUZZARD AIMING — DODGE!';
     if (!warn) return;
     viewport.ctx.font = 'bold 16px sans-serif'; viewport.ctx.textAlign = 'center';
     const tw = viewport.ctx.measureText(warn).width + 28;

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createGame } from '../src/game.js';
 import { createStorage } from '../src/core/storage.js';
-import { DEFAULT_ANIMAL_SIZES, SETTINGS_KEY, SPECIES, PROGRESS_KEY } from '../src/config.js';
+import { DEFAULT_ANIMAL_SIZES, SETTINGS_KEY, SPECIES, PROGRESS_KEY, HUNTER_AIM_T, HUNTER_RANGE } from '../src/config.js';
 
 function fixture(saved = {}) {
   const values = new Map(Object.entries(saved).map(([key, value]) => [key, JSON.stringify(value)]));
@@ -146,6 +146,64 @@ test('a crossed predator does not intercept a hunter shot before the bird', () =
   assert.equal(session.progress.ach.xcat, undefined);
 });
 
+function catEncounter(hawkMode = 'stalk', catMode = 'hide') {
+  const game = fixture();
+  const { session, systems } = game;
+  systems.water.spawnHazards = () => {};
+  systems.world.lakeAtX = () => null;
+  systems.world.insideCloud = () => false;
+  Object.assign(session.bird, { x: 2, alt: 2, vx: 0, vy: 0 });
+  const cat = { x: 0, alt: 0, mode: catMode, tgt: 'bird', dir: 1, t: 0, alertT: 0, vx: 0, vy: 0 };
+  const hawk = { x: 20, alt: 10, vx: 0, vy: 0, mode: hawkMode, t: 10, flapT: 0, alertT: 0, minD: Infinity, attacks: 0 };
+  session.state.hazards.cats = [cat];
+  session.state.hazards.hawk = hawk;
+  return { ...game, cat, hawk };
+}
+
+test('cats prioritize pursuing goshawks over a closer player and can switch during crouch', () => {
+  for (const mode of ['stalk', 'stoop']) {
+    for (const catMode of ['hide', 'crouch']) {
+      const { systems, cat } = catEncounter(mode, catMode);
+      systems.hazards.updateHazards(0);
+      assert.equal(cat.tgt, 'hawk');
+      assert.equal(cat.mode, catMode === 'hide' ? 'crouch' : 'leap');
+      if (cat.mode === 'leap') assert.ok(cat.vx > 20);
+    }
+  }
+});
+
+test('cats retain normal targeting for absent, departing, or out-of-range goshawks', () => {
+  for (const scenario of ['absent', 'gone', 'high', 'far', 'leave', 'recover']) {
+    const { session, systems, cat, hawk } = catEncounter();
+    if (scenario === 'absent') session.state.hazards.hawk = null;
+    if (scenario === 'gone') hawk.gone = true;
+    if (scenario === 'high') hawk.alt = 100;
+    if (scenario === 'far') hawk.x = 100;
+    if (scenario === 'leave' || scenario === 'recover') hawk.mode = scenario;
+    systems.hazards.updateHazards(0);
+    assert.equal(cat.tgt, 'bird', scenario);
+  }
+});
+
+test('a cat can complete a prioritized goshawk leap and earn Cat Among the Hawks', () => {
+  const { session, systems, cat, hawk, values } = catEncounter();
+  systems.hazards.updateHazards(0);
+  cat.t = 0;
+  systems.hazards.updateHazards(0);
+  assert.equal(cat.mode, 'leap');
+  assert.equal(cat.tgt, 'hawk');
+  Object.assign(session.bird, { x: 100, alt: 100 });
+  for (let frame = 0; frame < 120 && !hawk.gone; frame++) {
+    Object.assign(hawk, { x: 20, alt: 10, vx: 0, vy: 0 });
+    systems.hazards.updateHazards(1 / 120);
+  }
+  assert.equal(hawk.gone, true);
+  assert.equal(session.state.over, false);
+  assert.equal(session.state.lastCatch.by, 'cat');
+  assert.equal(session.progress.ach.cathawk, session.state.day);
+  assert.equal(JSON.parse(values.get(PROGRESS_KEY)).ach.cathawk, session.state.day);
+});
+
 test('bounce steering returns gradually after the one-second lockout', () => {
   const steeringAt = (lockT, controlT) => {
     const { session, systems } = fixture();
@@ -186,7 +244,7 @@ test('secret upgrades and achievements give no advance hints', () => {
   assert.ok(!shell.desc.includes('rifle') && !shell.desc.includes('grotto'));
   assert.equal(upgrades.find(u => u.id === 'aim').stat(0), 'Drop only (no aim)');
   const hidden = ['skeet', 'drownedTurtle', 'buzzsaw', 'parry', 'kraken', 'moon', 'satellite'];
-  assert.ok(systems.progression.visibleAchievements().every(a => !hidden.includes(a.id)));
+  assert.ok(systems.progression.visibleAchievements().filter(a => hidden.includes(a.id)).every(a => a.name && a.desc === 'hidden achievement' && a.reward === null));
   systems.combat.achieve('parry');
   assert.ok(systems.progression.visibleAchievements().some(a => a.id === 'parry'));
   session.progress.gunFound = true;
@@ -218,6 +276,29 @@ test('base turtles drop without aiming and the first aim upgrade adds a push', (
   const aimed = systems.prey.throwVelocity(true);
   assert.ok(Math.hypot(aimed.vx - 10, aimed.vy + 5) > 0);
   assert.deepEqual(systems.prey.throwVelocity(false), { vx: 10, vy: -5 });
+});
+
+test('talons-out pose is restricted to active empty-handed grabbing', () => {
+  const { session, systems } = fixture();
+  assert.equal(systems.input.talonsOut(), false);
+  session.mouse.aiming = true;
+  assert.equal(systems.input.talonsOut(), true);
+  for (const carrying of [{ kind: 'turtle' }, { kind: 'gun', ammo: 1 }]) {
+    session.bird.carrying = carrying;
+    assert.equal(systems.input.talonsOut(), false);
+  }
+  session.bird.carrying = null;
+  session.mouse.throwHeld = true;
+  assert.equal(systems.input.talonsOut(), false);
+  session.mouse.throwHeld = false;
+  session.paused = true;
+  assert.equal(systems.input.talonsOut(), false);
+  session.paused = false;
+  session.screen = 'shop';
+  assert.equal(systems.input.talonsOut(), false);
+  session.screen = 'hunt';
+  session.state.over = true;
+  assert.equal(systems.input.talonsOut(), false);
 });
 
 test('intact turtles can be picked up immediately after every landing path', () => {
@@ -323,6 +404,136 @@ test('hunters can shoot buzzards crossing their line and record the killer', () 
   assert.equal(session.state.lastCatch.targetKind, 'buzzard');
   assert.equal(session.state.lastCatch.by, 'hunter');
   assert.equal(session.progress.ach.xcat, undefined);
+});
+
+function stealRifle(game, ammo = 2) {
+  const { session, systems } = game;
+  systems.world.thermalCol = () => ({ on: false });
+  systems.world.insideCloud = () => false;
+  Object.assign(session.bird, { x: 0, alt: 220, vx: 0, vy: 0, carrying: { kind: 'gun', ammo } });
+  const buzzard = { x: 1, alt: 220, cx: 1, calt: 220, vx: 0, vy: 0, ang: 0, mode: 'chase', t: 7, flapT: 0 };
+  session.state.rivals = [buzzard];
+  systems.hazards.updateRivals(0.01);
+  return buzzard;
+}
+
+test('a rifle thief keeps the stolen ammo and telegraphs its first shot before earning a hidden achievement', () => {
+  const game = fixture();
+  const { session, systems, values } = game;
+  const buzzard = stealRifle(game);
+  assert.equal(session.bird.carrying, null);
+  assert.deepEqual(buzzard.gun, { ammo: 2 });
+  assert.equal(buzzard.mode, 'armed');
+  assert.equal(session.progress.ach.armedBuzzard, undefined);
+  assert.equal(systems.progression.visibleAchievements().find(a => a.id === 'armedBuzzard').desc, 'hidden achievement');
+  Object.assign(buzzard, { x: -85, alt: 220 });
+  for (let i = 0; i < 100 && !buzzard.aim; i++) systems.hazards.updateRivals(0.05);
+  assert.equal(buzzard.aim, HUNTER_AIM_T);
+  assert.equal(buzzard.gun.ammo, 2);
+  assert.equal(session.state.over, false);
+  session.bird.alt += 50;
+  systems.hazards.updateRivals(HUNTER_AIM_T + 0.01);
+  assert.equal(buzzard.gun.ammo, 1);
+  assert.equal(session.state.over, false);
+  assert.ok(buzzard.tracer > 0);
+  assert.equal(session.progress.ach.armedBuzzard, session.state.day);
+  assert.equal(JSON.parse(values.get(PROGRESS_KEY)).ach.armedBuzzard, session.state.day);
+  assert.ok(systems.progression.visibleAchievements().some(a => a.id === 'armedBuzzard'));
+  const money = session.progress.money;
+  Object.assign(buzzard, { aim: 0.01, ax: 100, aalt: 220 });
+  systems.hazards.updateRivals(0.02);
+  assert.equal(buzzard.gun.ammo, 0);
+  assert.equal(buzzard.mode, 'leave');
+  assert.equal(session.progress.money, money);
+  systems.hazards.updateRivals(1);
+  assert.equal(buzzard.gun.ammo, 0);
+});
+
+test('empty rifles and stolen turtles do not arm buzzards', () => {
+  for (const carrying of [{ kind: 'gun', ammo: 0 }, { kind: 'turtle' }]) {
+    const game = fixture();
+    const buzzard = stealRifle(game, 0);
+    if (carrying.kind === 'turtle') {
+      buzzard.gun = null;
+      buzzard.mode = 'chase'; buzzard.t = 7;
+      game.session.bird.carrying = carrying;
+      game.systems.hazards.updateRivals(0.01);
+    }
+    assert.equal(buzzard.mode, 'leave');
+    assert.equal(game.session.progress.ach.armedBuzzard, undefined);
+  }
+});
+
+test('buzzard shots use their airborne origin, respect cover and range, and support parries and lucky saves', () => {
+  for (const outcome of ['hit', 'water', 'cloud', 'range', 'parry', 'feather']) {
+    const game = fixture();
+    const { session, systems } = game;
+    const buzzard = stealRifle(game, 1);
+    Object.assign(buzzard, { x: -85, alt: 220, aim: 0.01, ax: 0, aalt: 220 });
+    if (outcome === 'water') session.bird.inWater = {};
+    if (outcome === 'cloud') systems.world.insideCloud = () => true;
+    if (outcome === 'range') session.bird.x = HUNTER_RANGE + 100;
+    if (outcome === 'parry') session.bird.bouncing = { spin: true };
+    if (outcome === 'feather') session.state.feathers = 1;
+    systems.hazards.updateRivals(0.02);
+    assert.equal(buzzard.gun.ammo, 0);
+    assert.equal(session.state.over, outcome === 'hit');
+    if (outcome === 'hit') assert.equal(session.state.recap.reason, 'buzzard');
+    if (outcome === 'parry') {
+      assert.equal(session.state.lastCatch.method, 'parry');
+      assert.equal(session.state.lastCatch.by, 'buzzard');
+    }
+    if (outcome === 'feather') assert.equal(session.state.feathers, 0);
+  }
+});
+
+test('defeating a rifle thief drops its remaining ammo exactly once through gun and turtle strikes', () => {
+  for (const method of ['gun', 'turtle']) {
+    const game = fixture();
+    const { session, systems } = game;
+    const buzzard = stealRifle(game, 2);
+    if (method === 'gun') systems.combat.takeShot({ type: 'buzzard', r: buzzard }, 'SHOT!');
+    else {
+      session.state.fallers = [{ x: buzzard.x, alt: buzzard.alt, vx: 0, vy: 0, spin: 0 }];
+      systems.combat.updateFallers(0.01);
+    }
+    assert.equal(buzzard.gone, true);
+    assert.equal(session.state.guns.length, 1);
+    assert.equal(session.state.guns[0].ammo, 2);
+    assert.ok(session.state.guns[0].alt > 200);
+    systems.prey.removeHazard('buzzard', buzzard);
+    assert.equal(session.state.guns.length, 1);
+  }
+});
+
+test('buzzard crossfire credits the buzzard rather than granting hunter-only achievements', () => {
+  const game = fixture();
+  const { session, systems } = game;
+  const buzzard = stealRifle(game, 1);
+  Object.assign(buzzard, { x: -85, alt: 220, aim: 0.01, ax: 0, aalt: 220 });
+  session.state.hazards.hawk = { x: -40, alt: 220, gone: false };
+  systems.hazards.updateRivals(0.02);
+  assert.equal(session.state.over, false);
+  assert.equal(session.state.lastCatch.targetKind, 'hawk');
+  assert.equal(session.state.lastCatch.by, 'buzzard');
+  assert.equal(session.progress.ach.xhawk, undefined);
+  assert.deepEqual(systems.hud.catchCircumstances(session.state.lastCatch).map(i => i.label), ['Shot by buzzard']);
+});
+
+test('armed eyases can interrupt a rifle thief and recover the weapon', () => {
+  const game = fixture();
+  const { session, systems } = game;
+  const buzzard = stealRifle(game, 2);
+  session.progress.up.eyas = 1;
+  session.progress.up.eyasgun = 1;
+  systems.companions.spawnEyases();
+  Object.assign(buzzard, { x: 25, alt: 220, aim: HUNTER_AIM_T });
+  systems.companions.updateEyases(0.01);
+  assert.equal(buzzard.gone, true);
+  assert.equal(session.state.lastCatch.targetKind, 'buzzard');
+  assert.equal(session.state.lastCatch.eyas, true);
+  assert.equal(session.state.guns[0].ammo, 2);
+  assert.equal(session.progress.ach.armedBuzzard, undefined);
 });
 
 test('storage handles corrupt data and unavailable browser storage', () => {

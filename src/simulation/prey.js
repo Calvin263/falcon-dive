@@ -619,11 +619,16 @@ export function createPrey({ session, viewport, systems }) {
 
   // Takes a predator out for the day; a downed hunter drops his rifle
   function removeHazard(kind, obj) {
+    if (obj.gone) return;
     obj.gone = true;
     const hz = session.state.hazards;
     if (kind === 'hawk') { hz.hawk = null; hz.hawkT = Math.max(hz.hawkT, 45); }
     if (kind === 'hunter') {
       session.state.guns.push({ x: obj.x, alt: 1.5, vx: (Math.random() - 0.5) * 8, vy: GUN_THROW_VY, ammo: systems.combat.gunStat('ammo') });
+    }
+    if (kind === 'buzzard' && obj.gun) {
+      session.state.guns.push({ x: obj.x, alt: obj.alt, vx: obj.vx || 0, vy: GUN_THROW_VY, ammo: obj.gun.ammo });
+      obj.gun = null;
     }
     for (let i = 0; i < 20; i++) session.particles.push({
       x: obj.x, alt: Math.max(0.5, obj.alt || 1), vx: (Math.random() - 0.5) * 18, vy: Math.random() * 12, life: 1.1

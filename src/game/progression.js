@@ -74,7 +74,7 @@ export function createProgression({ session, viewport, systems, storage }) {
   const upgradeCap = u => u.cap ? u.cap() : upgradeCosts(u).length;
   const bounceSpin = () => tier('bounce') >= 2;
   const moonSprings = () => tier('bounce') >= 4;
-  const visibleAchievements = () => ACHIEVEMENTS.filter(a => !a.hidden || session.progress.ach[a.id]);
+  const visibleAchievements = () => ACHIEVEMENTS.map(a => a.hidden && !session.progress.ach[a.id] ? { ...a, desc: 'hidden achievement', reward: null } : a);
   const freshProgress = () => ({ day: 1, money: 0, up: {}, best: { earned: 0, speed: 0 }, ach: {}, caught: {} });
   session.progress = freshProgress();
   function loadProgress() {
