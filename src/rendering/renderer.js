@@ -437,14 +437,6 @@ export function createRenderer({ session, viewport, systems }) {
       viewport.ctx.strokeStyle = `rgba(255,255,220,${1 - k})`; viewport.ctx.lineWidth = 3;
       viewport.ctx.beginPath(); viewport.ctx.arc(x, y, r * 1.1, 0, Math.PI * 2); viewport.ctx.stroke();
     }
-    // Glint over grounded rifles so they're findable
-    for (const g of guns) {
-      if (g.alt > 0) continue;
-      const x = systems.flight.toScreenX(g.x), y = systems.flight.toScreenY(0) - 22 - Math.sin(session.state.time * 4) * 3;
-      if (x < -40 || x > viewport.W + 40) continue;
-      viewport.ctx.fillStyle = '#ffdd55';
-      viewport.ctx.beginPath(); viewport.ctx.moveTo(x - 6, y - 6); viewport.ctx.lineTo(x + 6, y - 6); viewport.ctx.lineTo(x, y + 2); viewport.ctx.fill();
-    }
     for (const tr of session.state.tracers) {
       viewport.ctx.strokeStyle = `rgba(255,230,140,${tr.t / 0.25})`; viewport.ctx.lineWidth = systems.combat.gunAuto() ? 2 : 3;
       viewport.ctx.beginPath(); viewport.ctx.moveTo(systems.flight.toScreenX(tr.x0), systems.flight.toScreenY(tr.a0)); viewport.ctx.lineTo(systems.flight.toScreenX(tr.x1), systems.flight.toScreenY(tr.a1)); viewport.ctx.stroke();
@@ -498,9 +490,7 @@ export function createRenderer({ session, viewport, systems }) {
 
   function drawFallers() {
     drawGunStuff();
-    // While intentionally holding right-click to throw a carried turtle, show the simulated arc (and, with Homing turtle, the target).
-    // With only the Sight upgrade, the plain-drop path is shown the whole time a turtle is carried.
-    const aiming = session.mouse.aiming && session.bird.carrying && session.bird.carrying.kind !== 'gun' && session.mouse.throwHeld && !session.state.over;
+    const aiming = systems.progression.aimTier() > 0 && session.mouse.aiming && session.bird.carrying && session.bird.carrying.kind !== 'gun' && session.mouse.throwHeld && !session.state.over;
     if (aiming) {
       const { vx, vy } = systems.prey.throwVelocity(true);
       const path = systems.prey.simulateThrow(session.bird.x, session.bird.alt, vx, vy);
@@ -1368,12 +1358,12 @@ export function createRenderer({ session, viewport, systems }) {
       worldCtx.strokeText = function (...args) { recordText(this, 'strokeText', args); };
     }
     try {
-      if (!session.state.grotto && !session.state.moonshot) {
+      if (session.screen === 'hunt' && !session.state.grotto && !session.state.moonshot) {
         systems.hud.drawPreyIndicators();
         systems.hud.drawClosingHint();
         drawBirdLens();
         drawSunIndicator();
-        if (session.screen === 'hunt') drawHazardWarnings();
+        drawHazardWarnings();
       }
       if (session.screen === 'hunt') {
         systems.hud.drawHUD();

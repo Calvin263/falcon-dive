@@ -1,5 +1,4 @@
 import { HAZARD_NAME, ACHIEVEMENTS, SPECIES } from '../config.js';
-import { drawWrappedText } from './text.js';
 
 export function createScreens({ session, viewport, systems }) {
   // ---------- Recap & Roost screens ----------
@@ -25,8 +24,8 @@ export function createScreens({ session, viewport, systems }) {
     const groups = new Map();
     for (const c of catches) {
       const kind = c.targetKind || c.kind;
-      const key = kind + (c.turtleHit ? ':turtle' : '');
-      if (!groups.has(key)) groups.set(key, { kind, turtleHit: !!c.turtleHit, count: 0, pts: 0, tags: new Set() });
+      const key = `${kind}:${systems.hud.catchCircumstances(c).map(item => item.id).join(':')}`;
+      if (!groups.has(key)) groups.set(key, { ...c, kind, count: 0, pts: 0, tags: new Set() });
       const g = groups.get(key);
       g.count += c.count || 1;
       g.pts += c.pts;
@@ -70,13 +69,14 @@ export function createScreens({ session, viewport, systems }) {
       const g = row.g || { kind: row.s.targetKind || row.s.kind, turtleHit: row.s.turtleHit, count: row.s.count || 1, pts: row.s.pts };
       viewport.ctx.globalAlpha = row.s ? 0.55 : 1;
       systems.hud.drawCatchIcon(g.kind, x0 + 36, y + rowH / 2, 15, g.turtleHit);
+      systems.hud.drawCatchCircumstances(row.s || g, x0 + pw - 145, y + 14, 60);
       viewport.ctx.textAlign = 'left';
       viewport.ctx.fillStyle = '#fff'; viewport.ctx.font = 'bold 16px sans-serif';
       const label = row.s ? `Stolen by a buzzard: ${catchName(g)}` : `${catchName(g)}${g.turtleHit ? ' (turtle strike)' : ''}  ×${g.count}`;
-      viewport.ctx.fillText(label, x0 + 62, y + (row.s ? 25 : 19));
+      viewport.ctx.fillText(label, x0 + 62, y + (row.s ? 25 : 19), pw - 220);
       if (row.g && g.tags.size) {
         viewport.ctx.fillStyle = '#9fd8ff'; viewport.ctx.font = '11px sans-serif';
-        viewport.ctx.fillText([...g.tags].join(' · '), x0 + 62, y + 34);
+        viewport.ctx.fillText([...g.tags].join(' · '), x0 + 62, y + 34, pw - 220);
       }
       viewport.ctx.textAlign = 'right';
       viewport.ctx.font = 'bold 17px monospace';
@@ -117,9 +117,11 @@ export function createScreens({ session, viewport, systems }) {
     viewport.ctx.fillText('The Roost', 16, 36);
     viewport.ctx.textAlign = 'center';
     viewport.ctx.fillStyle = '#cfe6f7'; viewport.ctx.font = '14px sans-serif';
-    viewport.ctx.fillText(`Choose an upgrade · Next hunt: day ${session.progress.day}`, viewport.W / 2, 70);
-    viewport.ctx.fillStyle = session.progress.moon ? '#ffd34d' : '#8fa3b8'; viewport.ctx.font = session.progress.moon ? 'bold 12px sans-serif' : '12px sans-serif';
-    viewport.ctx.fillText(session.progress.moon ? `🌕 You reached the moon on day ${session.progress.moon}` : '🌕 Goal: bounce high enough to reach the moon', viewport.W / 2, 88);
+    viewport.ctx.fillText(`Click an upgrade to buy · Next hunt: day ${session.progress.day}`, viewport.W / 2, 70);
+    if (session.progress.moon) {
+      viewport.ctx.fillStyle = '#ffd34d'; viewport.ctx.font = 'bold 12px sans-serif';
+      viewport.ctx.fillText(`🌕 You reached the moon on day ${session.progress.moon}`, viewport.W / 2, 88);
+    }
     viewport.ctx.textAlign = 'right'; viewport.ctx.fillStyle = '#ffd34d'; viewport.ctx.font = 'bold 26px monospace';
     viewport.ctx.fillText(`$${session.progress.money}`, viewport.W - 24, 32);
     viewport.ctx.fillStyle = '#aab'; viewport.ctx.font = '12px sans-serif';
@@ -127,43 +129,36 @@ export function createScreens({ session, viewport, systems }) {
 
     const list = systems.progression.shopUpgrades();
     const narrow = viewport.W < 520;
-    const { cols, rows: rowsN, top: gy, tileHeight: ch, gap, detailHeight } = shopMetrics();
+    const { cols, top: gy, tileHeight: ch, gap } = shopMetrics();
     const cw = Math.min(280, (viewport.W - 32 - (cols - 1) * gap) / cols);
     const rowStep = ch + gap;
     const gx = (viewport.W - (cols * cw + (cols - 1) * gap)) / 2;
     session.shopScroll = 0;
-    const selected = list.find(u => u.id === session.shopSelection) || list[0];
-    session.shopSelection = selected.id;
     list.forEach((u, i) => {
       const x = gx + (i % cols) * (cw + gap), y = gy + Math.floor(i / cols) * rowStep;
-      const t = systems.progression.tier(u.id), costs = systems.progression.upgradeCosts(u), maxed = t >= costs.length, capped = !maxed && t >= systems.progression.upgradeCap(u);
-      session.uiButtons.push({ x, y, w: cw, h: ch, label: u.name, id: u.id, enabled: true, onClick: () => { session.shopSelection = u.id; } });
-      viewport.ctx.fillStyle = selected === u ? '#2c4b69' : 'rgba(20,32,50,0.95)'; viewport.ctx.fillRect(x, y, cw, ch);
-      viewport.ctx.strokeStyle = selected === u ? '#ffd34d' : maxed ? '#7fd67f' : 'rgba(255,255,255,0.2)'; viewport.ctx.lineWidth = 1;
+      const t = systems.progression.tier(u.id), costs = systems.progression.upgradeCosts(u), maxed = t >= costs.length;
+      const enabled = !maxed && t < systems.progression.upgradeCap(u) && session.progress.money >= costs[t];
+      const hover = session.mouse.x >= x && session.mouse.x <= x + cw && session.mouse.y >= y && session.mouse.y <= y + ch;
+      session.uiButtons.push({ x, y, w: cw, h: ch, label: u.name, id: u.id, enabled, onClick: () => systems.progression.buyUpgrade(u.id) });
+      viewport.ctx.fillStyle = hover && enabled ? '#2c4b69' : 'rgba(20,32,50,0.95)'; viewport.ctx.fillRect(x, y, cw, ch);
+      viewport.ctx.strokeStyle = hover && enabled ? '#ffd34d' : maxed ? '#7fd67f' : 'rgba(255,255,255,0.2)'; viewport.ctx.lineWidth = 1;
       viewport.ctx.strokeRect(x + 0.5, y + 0.5, cw - 1, ch - 1);
       viewport.ctx.textAlign = 'left'; viewport.ctx.fillStyle = '#fff'; viewport.ctx.font = 'bold 13px sans-serif';
-      drawWrappedText(viewport.ctx, u.name, x + 8, y + 17, cw - 16, 14);
+      viewport.ctx.fillText(u.name, x + 8, y + 16, cw - 16);
+      viewport.ctx.font = `${narrow ? 10 : 11}px sans-serif`; viewport.ctx.fillStyle = '#cfe6f7';
+      viewport.ctx.fillText(`Now: ${u.stat(t)}`, x + 8, y + 30, cw - 16);
+      viewport.ctx.fillStyle = '#7fd67f';
+      viewport.ctx.fillText(maxed ? 'Fully upgraded' : `Next: ${u.stat(t + 1)}`, x + 8, y + 43, cw - 16);
+      if (ch >= 94) {
+        viewport.ctx.fillStyle = '#9aa7b8';
+        viewport.ctx.fillText(u.desc, x + 8, y + 59, cw - 16);
+      }
       viewport.ctx.font = '11px sans-serif'; viewport.ctx.fillStyle = '#cfe6f7';
-      viewport.ctx.fillText(`${t}/${costs.length}`, x + 8, y + ch - 9);
+      viewport.ctx.fillText(`${t}/${costs.length}`, x + 8, y + ch - 8);
       viewport.ctx.textAlign = 'right';
-      viewport.ctx.fillStyle = maxed ? '#7fd67f' : capped || session.progress.money < costs[t] ? '#9aa7b8' : '#ffd34d';
-      viewport.ctx.fillText(maxed ? 'MAX' : capped ? 'LOCKED' : `$${costs[t]}`, x + cw - 8, y + ch - 9);
+      viewport.ctx.fillStyle = maxed ? '#7fd67f' : !enabled ? '#9aa7b8' : '#ffd34d';
+      viewport.ctx.fillText(maxed ? 'MAX' : `Buy $${costs[t]}`, x + cw - 8, y + ch - 8);
     });
-    const detailY = gy + rowsN * rowStep;
-    const gridWidth = cols * cw + (cols - 1) * gap;
-    drawPanel(gx, detailY, gridWidth, detailHeight);
-    const t = systems.progression.tier(selected.id), costs = systems.progression.upgradeCosts(selected);
-    const maxed = t >= costs.length, capped = !maxed && t >= systems.progression.upgradeCap(selected);
-    viewport.ctx.textAlign = 'left'; viewport.ctx.fillStyle = '#fff'; viewport.ctx.font = 'bold 15px sans-serif';
-    viewport.ctx.fillText(selected.name, gx + 12, detailY + 22);
-    viewport.ctx.font = '12px sans-serif'; viewport.ctx.fillStyle = '#cfe6f7';
-    let textY = drawWrappedText(viewport.ctx, selected.desc, gx + 12, detailY + 42, gridWidth - 24, 16);
-    textY = drawWrappedText(viewport.ctx, `Now: ${selected.stat(t)}`, gx + 12, textY + 4, gridWidth - 24, 16);
-    viewport.ctx.fillStyle = capped ? '#ffb36b' : '#7fd67f';
-    if (!maxed) drawWrappedText(viewport.ctx, capped ? selected.capHint : `Next: ${selected.stat(t + 1)}`, gx + 12, textY + 4, gridWidth - 24, 16);
-    drawButton(gx + gridWidth - 132, detailY + detailHeight - 40, 120, 32, maxed ? 'MAXED' : capped ? 'LOCKED' : `Buy $${costs[t]}`,
-      () => systems.progression.buyUpgrade(selected.id),
-      { enabled: !maxed && !capped && session.progress.money >= costs[t], primary: true, id: 'buyUpgrade' });
 
     const got = ACHIEVEMENTS.filter(a => session.progress.ach[a.id]).length;
     if (narrow) {
@@ -171,12 +166,12 @@ export function createScreens({ session, viewport, systems }) {
       const utilityY = viewport.H - 50, utilityWidth = (viewport.W - 48) / 2;
       drawButton(16, utilityY, utilityWidth, 32, session.confirmReset ? 'Click again to wipe' : 'Reset progress',
                  () => { if (session.confirmReset) systems.session.resetProgress(); else session.confirmReset = true; }, { font: '12px sans-serif' });
-      drawButton(32 + utilityWidth, utilityY, utilityWidth, 32, `Achievements ${got}/${ACHIEVEMENTS.length}`, () => { session.achView = true; }, { font: 'bold 12px sans-serif' });
+      drawButton(32 + utilityWidth, utilityY, utilityWidth, 32, `Achievements ${got}`, () => { session.achView = true; }, { font: 'bold 12px sans-serif' });
     } else {
       drawButton(viewport.W / 2 - 120, viewport.H - 62, 240, 42, `Start day ${session.progress.day} →`, systems.session.startDay, { primary: true, font: 'bold 17px sans-serif', id: 'startDay' });
       drawButton(16, viewport.H - 50, 150, 30, session.confirmReset ? 'Click again to wipe' : 'Reset progress',
                  () => { if (session.confirmReset) systems.session.resetProgress(); else session.confirmReset = true; }, { font: '12px sans-serif' });
-      drawButton(viewport.W - 196, viewport.H - 50, 180, 30, `🏆 Achievements ${got}/${ACHIEVEMENTS.length}`, () => { session.achView = true; }, { font: 'bold 13px sans-serif' });
+      drawButton(viewport.W - 196, viewport.H - 50, 180, 30, `🏆 Achievements ${got}`, () => { session.achView = true; }, { font: 'bold 13px sans-serif' });
     }
     if (!narrow && session.progress.best.earned > 0) {
       viewport.ctx.textAlign = 'right'; viewport.ctx.fillStyle = '#9aa7b8'; viewport.ctx.font = '12px sans-serif';
@@ -190,18 +185,19 @@ export function createScreens({ session, viewport, systems }) {
     const cols = viewport.W >= 1080 ? 4 : viewport.W >= 520 || viewport.H < 740 ? 3 : 2;
     const rows = Math.ceil(systems.progression.shopUpgrades().length / cols);
     const top = 100, bottom = viewport.H - (narrow ? 112 : 80), gap = 6;
-    const detailHeight = narrow ? 208 : 172;
-    const tileHeight = Math.min(68, Math.floor((bottom - top - detailHeight - 8) / rows) - gap);
-    const contentHeight = rows * (tileHeight + gap) + detailHeight;
-    return { top, bottom, rows, cols, tileHeight, gap, detailHeight, contentHeight, scroll: 0, maxScroll: 0 };
+    const tileHeight = Math.min(110, Math.floor((bottom - top) / rows) - gap);
+    const contentHeight = rows * (tileHeight + gap);
+    return { top, bottom, rows, cols, tileHeight, gap, contentHeight, scroll: 0, maxScroll: 0 };
   }
 
   // Achievement list over the Roost: earned ones in gold with the day, the rest dimmed
   function drawAchievements() {
     session.uiButtons = [];
     viewport.ctx.fillStyle = 'rgba(0,0,0,0.6)'; viewport.ctx.fillRect(0, 0, viewport.W, viewport.H);
-    const cols = viewport.W >= 900 ? 2 : 1, rowH = 46, gap = 10;
-    const rows = Math.ceil(ACHIEVEMENTS.length / cols);
+    const list = systems.progression.visibleAchievements();
+    const cols = viewport.W >= 900 ? 2 : 1, gap = 10;
+    const rows = Math.ceil(list.length / cols);
+    const rowH = Math.min(46, Math.floor((viewport.H - 150) / rows));
     const cw = Math.min(400, (viewport.W - 80 - (cols - 1) * gap) / cols);
     const pw = cols * cw + (cols - 1) * gap + 40, ph = Math.min(viewport.H - 30, 120 + rows * rowH);
     const x0 = (viewport.W - pw) / 2, y0 = (viewport.H - ph) / 2;
@@ -210,9 +206,9 @@ export function createScreens({ session, viewport, systems }) {
     viewport.ctx.textAlign = 'center'; viewport.ctx.fillStyle = '#ffd34d'; viewport.ctx.font = 'bold 24px sans-serif';
     viewport.ctx.fillText('Achievements', viewport.W / 2, y0 + 36);
     viewport.ctx.fillStyle = '#cfe6f7'; viewport.ctx.font = '13px sans-serif';
-    viewport.ctx.fillText(`${got.length} of ${ACHIEVEMENTS.length} earned  ·  $${got.reduce((s, a) => s + a.reward, 0)} in rewards`, viewport.W / 2, y0 + 56);
+    viewport.ctx.fillText(`${got.length} earned  ·  $${got.reduce((s, a) => s + a.reward, 0)} in rewards`, viewport.W / 2, y0 + 56);
     const species = Object.keys(SPECIES), caught = species.filter(k => session.progress.caught[k]).length;
-    ACHIEVEMENTS.forEach((a, i) => {
+    list.forEach((a, i) => {
       const x = x0 + 20 + (i % cols) * (cw + gap), y = y0 + 70 + Math.floor(i / cols) * rowH;
       const day = session.progress.ach[a.id];
       viewport.ctx.fillStyle = day ? 'rgba(255,211,77,0.12)' : 'rgba(255,255,255,0.04)'; viewport.ctx.fillRect(x, y, cw, rowH - 6);

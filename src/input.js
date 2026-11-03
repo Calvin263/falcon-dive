@@ -5,9 +5,15 @@ export function createInput({ session, viewport, systems }) {
   session.mouse = { x: viewport.W / 2, y: viewport.H / 2, down: false, sliderDrag: false, sliderKind: null, aiming: false, talonTarget: null, throwHeld: false, steer: null };
   const inPauseBtn = (x, y) =>
     x >= PAUSE_BTN.x && x <= PAUSE_BTN.x + PAUSE_BTN.w && y >= PAUSE_BTN.y && y <= PAUSE_BTN.y + PAUSE_BTN.h;
+  function cancelAim() {
+    session.mouse.aiming = false;
+    session.mouse.throwHeld = false;
+    session.mouse.talonTarget = null;
+    session.mouse.steer = null;
+  }
 
   session.paused = false;
-  function togglePause() { session.paused = !session.paused; session.mouse.down = false; session.mouse.sliderDrag = false; session.mouse.sliderKind = null; session.mouse.aiming = false; session.mouse.throwHeld = false; session.mouse.talonTarget = null; }
+  function togglePause() { session.paused = !session.paused; session.mouse.down = false; session.mouse.sliderDrag = false; session.mouse.sliderKind = null; cancelAim(); }
   function bindInput(options = {}) {
     viewport.canvas.addEventListener('mousemove', e => {
       session.mouse.x = e.clientX; session.mouse.y = e.clientY;
@@ -39,6 +45,7 @@ export function createInput({ session, viewport, systems }) {
         return;
       }
       if (e.button === 2) {
+        if (session.mouse.down) return;
         if (session.bird.carrying) {
           // Without the Aimed Throw upgrade, right-click just lets go
           session.mouse.aiming = true;
@@ -57,7 +64,10 @@ export function createInput({ session, viewport, systems }) {
         }
         return;
       }
-      session.mouse.down = true;
+      if (e.button === 0) {
+        cancelAim();
+        session.mouse.down = true;
+      }
     }, options);
     addEventListener('mouseup', e => {
       if (e.button !== 2) {
@@ -91,7 +101,7 @@ export function createInput({ session, viewport, systems }) {
       if (e.key === ' ') { e.preventDefault(); systems.prey.dropTurtle(); }
       if (e.key === 'e' || e.key === 'E') systems.companions.eyasCall();
     }, options);
-    addEventListener('blur', () => { if (!session.state.over) session.paused = true; session.mouse.down = false; session.mouse.aiming = false; session.mouse.sliderDrag = false; session.mouse.sliderKind = null; }, options);
+    addEventListener('blur', () => { if (!session.state.over) session.paused = true; session.mouse.down = false; cancelAim(); session.mouse.sliderDrag = false; session.mouse.sliderKind = null; }, options);
   }
   return { bindInput, inPauseBtn };
 }

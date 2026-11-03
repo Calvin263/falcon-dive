@@ -12,6 +12,8 @@ export function createHazards({ session, viewport, systems }) {
       session.state.rivals.push({ cx: th.x, calt: alt, x: th.x, alt, ang: Math.random() * 6.28, mode: 'circle', t: 0, flapT: 0, vx: 1, vy: 0 });
     }
     for (const r of session.state.rivals) {
+      if (r.gone) continue;
+      r.prevX = r.x; r.prevAlt = r.alt;
       r.t -= dt; r.flapT += dt * 6;
       const dx = session.bird.x - r.x, dy = session.bird.alt - r.alt, d = Math.hypot(dx, dy);
       const fresh = session.state.lastCatch && session.state.time - session.state.lastCatch.t < systems.progression.stealWindow() && !session.state.lastCatch.stolen && !session.state.lastCatch.eyas;
@@ -29,6 +31,7 @@ export function createHazards({ session, viewport, systems }) {
           } else if (fresh) {
             const e = session.state.lastCatch;
             e.stolen = true;
+            e.stolenBy = 'buzzard';
             session.state.score -= e.pts;
             session.state.catchLog.splice(session.state.catchLog.indexOf(e), 1);
             session.state.steals.push(e);
@@ -127,7 +130,15 @@ export function createHazards({ session, viewport, systems }) {
         c.vx *= 0.3;
       }
       if (systems.prey.sweptDist(c.x, c.alt, dt) < CAT_HIT) killBird('cat', 'A cat pounced from the grass!');
-      if (c.alt <= 0) { c.alt = 0; c.vx = 0; c.mode = 'sit'; c.t = 1.5; }
+      if (c.alt <= 0) {
+        const lake = systems.world.lakeAtX(c.x);
+        if (lake) {
+          c.gone = true;
+          systems.water.splashAt(c.x, lake);
+          return;
+        }
+        c.alt = 0; c.vx = 0; c.mode = 'sit'; c.t = 1.5;
+      }
     } else if (c.mode === 'sit' && c.t <= 0) {
       c.mode = 'hide'; c.t = 1;
     }
@@ -160,6 +171,9 @@ export function createHazards({ session, viewport, systems }) {
     if (hawk && !hawk.gone) {
       recordHunterLineCrossing(h, 'hawk', hawk, hawk.prevX ?? hawk.x, hawk.prevAlt ?? hawk.alt,
         hawk.x, hawk.alt, HAWK_HIT + 1);
+    }
+    for (const r of session.state.rivals) if (!r.gone) {
+      recordHunterLineCrossing(h, 'buzzard', r, r.prevX ?? r.x, r.prevAlt ?? r.alt, r.x, r.alt, 3);
     }
   }
 
@@ -224,15 +238,16 @@ export function createHazards({ session, viewport, systems }) {
     if (!systems.world.insideCloud(session.bird.x, session.bird.alt) && !session.bird.inWater) hits.push({ who: 'bird', d: onLine(session.bird.x, session.bird.alt, HUNTER_HIT) });
     if (hz.hawk && !hz.hawk.gone) hits.push({ who: 'hawk', obj: hz.hawk, d: onLine(hz.hawk.x, hz.hawk.alt, HAWK_HIT + 1) });
     for (const c of hz.cats) if (!c.gone && c.mode !== 'hide') hits.push({ who: 'cat', obj: c, d: onLine(c.x, c.alt + 0.4, 1.6) });
+    for (const r of session.state.rivals) if (!r.gone) hits.push({ who: 'buzzard', obj: r, d: onLine(r.x, r.alt, 3) });
     if (trackedHit && !trackedHit.obj.gone &&
-      (trackedHit.who === 'hawk' ? hz.hawk === trackedHit.obj : hz.cats.includes(trackedHit.obj))) hits.push(trackedHit);
+      (trackedHit.who === 'hawk' ? hz.hawk === trackedHit.obj : trackedHit.who === 'buzzard' ? session.state.rivals.includes(trackedHit.obj) : hz.cats.includes(trackedHit.obj))) hits.push(trackedHit);
     const first = hits.filter(o => o.d < Infinity).sort((a, b) => a.d - b.d)[0];
     if (!first) { session.state.msg = 'A shot whizzed past!'; session.state.msgT = 2; h.tracerLen = 0; return; }
     h.tracerLen = first.d;
     if (first.who !== 'bird') { crossfire(first.who, first.obj, 'hunter'); return; }
     if (session.bird.bouncing && session.bird.bouncing.spin) {
       // Buzzsaw parry: the spin bats the bullet away
-      systems.prey.award({ kind: 'turtle', speed: session.bird.speed, targetKind: 'bullet', stolen: true }, systems.session.priceCatch('bullet', {}), 'PARRY! Bullet deflected');
+      systems.prey.award({ kind: 'turtle', speed: session.bird.speed, targetKind: 'bullet', method: 'parry', stolen: true }, systems.session.priceCatch('bullet', {}), 'PARRY! Bullet deflected');
       systems.combat.achieve('parry');
       for (let i = 0; i < 12; i++) session.particles.push({ x: session.bird.x, alt: session.bird.alt, vx: (Math.random() - 0.5) * 24, vy: (Math.random() - 0.5) * 24, life: 0.5 });
       return;
@@ -242,12 +257,13 @@ export function createHazards({ session, viewport, systems }) {
 
   // A predator taken out by another predator: pays out like a strike, with a crossfire bonus
   function crossfire(kind, obj, by) {
-    const how = by === 'hunter' ? `CROSSFIRE! The hunter shot the ${HAZARD_NAME[kind].toLowerCase()}` : 'CROSSFIRE! A cat snatched the goshawk';
-    systems.prey.award({ kind: 'turtle', speed: session.bird.speed, targetKind: kind, stolen: true, crossfire: true },
+    const how = by === 'hunter' ? `CROSSFIRE! The hunter shot the ${(HAZARD_NAME[kind] || 'Buzzard').toLowerCase()}` : 'CROSSFIRE! A cat snatched the goshawk';
+    systems.prey.award({ kind: 'turtle', speed: session.bird.speed, targetKind: kind, stolen: true, crossfire: true, by },
           systems.session.priceCatch(kind, { crossfire: true }), how);
     session.state.msgT = 2.5;
     systems.prey.removeHazard(kind, obj);
-    systems.combat.achieve(by === 'cat' ? 'cathawk' : kind === 'hawk' ? 'xhawk' : 'xcat');
+    if (by === 'cat') systems.combat.achieve('cathawk');
+    else if (kind === 'hawk' || kind === 'cat') systems.combat.achieve(kind === 'hawk' ? 'xhawk' : 'xcat');
   }
 
   function spawnHawk() {
@@ -335,8 +351,8 @@ export function createHazards({ session, viewport, systems }) {
   function updateHazards(dt) {
     const hz = session.state.hazards;
     systems.water.spawnHazards();
-    for (const c of hz.cats) { if (c.frozenT > 0) { c.frozenT -= dt; continue; } updateCat(c, dt); if (session.state.over) return; }
-    for (const h of hz.hunters) { if (h.frozenT > 0) { h.frozenT -= dt; continue; } updateHunter(h, dt); if (session.state.over) return; }
+    for (const c of hz.cats) { if (c.gone) continue; if (c.frozenT > 0) { c.frozenT -= dt; continue; } updateCat(c, dt); if (session.state.over) return; }
+    for (const h of hz.hunters) { if (h.gone) continue; if (h.frozenT > 0) { h.frozenT -= dt; continue; } updateHunter(h, dt); if (session.state.over) return; }
     if (session.state.day >= HAWK_FROM_DAY && !hz.hawk && !session.state.sunset) {
       hz.hawkT -= dt;
       if (hz.hawkT <= 0) { spawnHawk(); hz.hawkT = 60 - 30 * danger() + Math.random() * 20; }

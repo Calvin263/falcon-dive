@@ -202,7 +202,7 @@ export function createHud({ session, viewport, systems }) {
         const impact = systems.combat.predictImpact(session.bird.alt, session.bird.vx, session.bird.vy);
         const ready = impact >= SHELL_CRACK_SPEED;
         const est = systems.session.priceCatch('turtle', { impact }, true).value;
-        banner(ready ? `Turtle ready · ~$${est} · Right-click: throw · Space: drop`
+        banner(ready ? `Turtle ready · ~$${est} · Right-click: ${systems.progression.aimTier() ? 'aim / throw' : 'drop'} · Space: drop`
           : `Turtle: ${(impact * 3.6).toFixed(0)}/${(SHELL_CRACK_SPEED * 3.6).toFixed(0)} km/h impact · Climb or dive faster`, ready ? '#7fd67f' : '#fff');
       }
     }
@@ -214,7 +214,7 @@ export function createHud({ session, viewport, systems }) {
     const rows = [];
     if (systems.progression.tier('lucky')) rows.push([`Lucky feather ×${session.state.feathers}`, session.state.feathers ? '#fff1b8' : '#9aa7b8']);
     if (systems.progression.tier('bounce')) rows.push([session.state.bounces === Infinity ? 'Springy legs ∞' : `Springy legs ×${session.state.bounces}`, session.state.bounces ? '#b8f1c8' : '#9aa7b8']);
-    if (systems.progression.moonSprings()) {
+    if (session.progress.moon && systems.progression.moonSprings()) {
       const chain = session.bird.bouncing && session.bird.bouncing.spin ? session.bird.bouncing.chain + 1 : 0;
       rows.push([`🌕 Launch ${Math.round(session.state.bestLaunch * 3.6)}/${Math.round(ESCAPE_V * 3.6)} km/h${chain ? ` · ×${chain}` : ''}`, '#ffe9a8']);
     }
@@ -426,6 +426,28 @@ export function createHud({ session, viewport, systems }) {
     if (turtleHit) systems.sprites.drawTurtle(ix + 9 * k, iy + 15 * k, { vx: 1 }, 0.7 * k);
   }
 
+  function catchCircumstances(c) {
+    const items = [];
+    if (c.turtleHit) items.push({ id: 'turtle', icon: '🐢', label: 'Turtle strike' });
+    if (c.drop != null) items.push({ id: 'drop', icon: '🐢', label: 'Shell cracked' });
+    if (c.method === 'buzzsaw') items.push({ id: 'buzzsaw', icon: '✹', label: 'Buzzsaw' });
+    if (c.method === 'parry') items.push({ id: 'parry', icon: '🛡', label: 'Parry' });
+    if ((c.targetKind || c.kind) === 'moon') items.push({ id: 'moon', icon: '🌕', label: 'Moon landing' });
+    if (c.shot && !c.crossfire) items.push({ id: 'gun', icon: '⊕', label: 'Shot' });
+    if (c.drowned || c.water) items.push({ id: 'water', icon: '💧', label: c.drowned ? 'Drowned' : 'Underwater' });
+    if (c.eyas) items.push({ id: 'eyas', icon: '🐣', label: 'Eyas' });
+    if (c.crossfire) items.push(c.by === 'cat'
+      ? { id: 'cat', icon: '🐈', label: 'Caught by cat' }
+      : { id: 'hunter', icon: '🎯', label: 'Shot by hunter' });
+    if (c.stolenBy === 'buzzard') items.push({ id: 'buzzard', icon: '🦅', label: 'Stolen by buzzard' });
+    return items;
+  }
+
+  function drawCatchCircumstances(c, x, y, maxWidth = 154) {
+    viewport.ctx.textAlign = 'left'; viewport.ctx.font = '14px sans-serif'; viewport.ctx.fillStyle = '#cfe6f7';
+    viewport.ctx.fillText(catchCircumstances(c).map(item => item.icon).join(' '), x, y, maxWidth);
+  }
+
   function drawCatchLog(noticeBottom = 52, statusHeight = 0) {
     const log = session.state.catchLog;
     const right = viewport.W - 14;
@@ -433,7 +455,7 @@ export function createHud({ session, viewport, systems }) {
     viewport.ctx.fillStyle = '#ffdd55'; viewport.ctx.font = 'bold 18px sans-serif';
     viewport.ctx.fillText(`DAY ${session.state.day}  ·  TODAY $${session.state.score}`, right, 28);
     // Catch cards stack top-down in a column on the right, newest on top
-    const CW = 92, CH = 50, GAP = 6, top = viewport.W < 720 ? Math.max(210, noticeBottom + 12) : 38, x = right - CW;
+    const CW = 170, CH = 78, GAP = 6, top = viewport.W < 720 ? Math.max(210, noticeBottom + 12) : 38, x = right - CW;
     const maxCards = Math.max(0, Math.floor(Math.min(viewport.H * 0.5, viewport.H - top - statusHeight - 130) / (CH + GAP)));
     const shown = maxCards ? log.slice(-maxCards).reverse() : [];
     let y = top + shown.length * (CH + GAP);
@@ -465,7 +487,9 @@ export function createHud({ session, viewport, systems }) {
       viewport.ctx.lineWidth = fresh ? 2 : 1;
       viewport.ctx.strokeRect(x + 0.5, y + 0.5, CW - 1, CH - 1);
       // Light badge behind the icon so dark animals (starlings, swifts) stay visible
-      drawCatchIcon(targetKind, x + 17, y + 25, 14, c.turtleHit);
+      drawCatchIcon(targetKind, x + 20, y + 19, 14, c.turtleHit);
+      viewport.ctx.textAlign = 'left'; viewport.ctx.fillStyle = '#fff'; viewport.ctx.font = 'bold 12px sans-serif';
+      viewport.ctx.fillText(`${SPECIES[targetKind]?.name || HAZARD_NAME[targetKind] || 'Buzzard'}${c.count > 1 ? ` ×${c.count}` : ''}`, x + 40, y + 20, CW - 48);
       if (c.count > 1) {
         viewport.ctx.font = 'bold 12px sans-serif'; viewport.ctx.textAlign = 'left';
         viewport.ctx.strokeStyle = '#000'; viewport.ctx.lineWidth = 3; viewport.ctx.strokeText(`×${c.count}`, x + 3, y + 13);
@@ -473,13 +497,24 @@ export function createHud({ session, viewport, systems }) {
       }
       viewport.ctx.textAlign = 'left';
       viewport.ctx.fillStyle = '#fff'; viewport.ctx.font = 'bold 15px monospace';
-      const sp = ((c.rel ?? c.speed) * 3.6).toFixed(0);
-      viewport.ctx.fillText(sp, x + 34, y + 21);
-      const spW = viewport.ctx.measureText(sp).width;
-      viewport.ctx.fillStyle = '#bbb'; viewport.ctx.font = '9px monospace';
-      viewport.ctx.fillText(c.rel != null ? 'rel' : 'km/h', x + 37 + spW, y + 21);
+      const circumstances = catchCircumstances(c);
+      drawCatchCircumstances(c, x + 8, y + 43);
+      const iconWidth = viewport.ctx.measureText(circumstances.map(item => item.icon).join(' ')).width;
+      viewport.ctx.font = '10px sans-serif';
+      viewport.ctx.fillText(circumstances.length ? circumstances.map(item => item.label).join(' · ') : 'Dive catch', x + 12 + iconWidth, y + 43, CW - 20 - iconWidth);
+      const sp = ((c.rel ?? c.speed ?? 0) * 3.6).toFixed(0);
+      viewport.ctx.fillStyle = '#ccc'; viewport.ctx.font = '10px monospace';
+      viewport.ctx.fillText(`${sp} ${c.rel != null ? 'rel km/h' : 'km/h'}${c.depth != null ? ` · ${c.depth.toFixed(1)} m` : ''}`, x + 8, y + 59, CW - 66);
+      viewport.ctx.textAlign = 'right';
       viewport.ctx.fillStyle = '#ffdd55'; viewport.ctx.font = 'bold 13px monospace';
-      viewport.ctx.fillText(`$${c.pts}`, x + 34, y + 40);
+      viewport.ctx.fillText(`$${c.pts}`, x + CW - 8, y + 59);
+      viewport.ctx.textAlign = 'left'; viewport.ctx.fillStyle = '#b7ccdd'; viewport.ctx.font = '9px sans-serif';
+      const tags = c.tags || [];
+      let summary = tags.join(' · ');
+      for (let count = tags.length; count > 0 && viewport.ctx.measureText(summary).width > CW - 16; count--) {
+        summary = `${tags.slice(0, count - 1).join(' · ')}${count > 1 ? ' · ' : ''}+${tags.length - count + 1} modifiers`;
+      }
+      viewport.ctx.fillText(summary, x + 8, y + 72, CW - 16);
       y += CH + GAP;
     }
     return bottom;
@@ -532,5 +567,5 @@ export function createHud({ session, viewport, systems }) {
     viewport.ctx.beginPath(); viewport.ctx.arc(x, y, r, -Math.PI / 2, -Math.PI / 2 + fill * Math.PI * 2); viewport.ctx.stroke();
     viewport.ctx.lineCap = 'butt';
   }
-  return { drawCatchIcon, drawClosingHint, drawHUD, drawPauseButton, drawPausePanel, drawPreyIndicators };
+  return { catchCircumstances, drawCatchCircumstances, drawCatchIcon, drawClosingHint, drawHUD, drawPauseButton, drawPausePanel, drawPreyIndicators };
 }

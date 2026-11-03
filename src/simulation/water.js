@@ -73,7 +73,7 @@ export function createWater({ session, viewport, systems }) {
       return;
     }
   }
-  const grottoOpen = l => !!(l && l.grotto && systems.progression.tier('shell') >= 2 && !session.state.grottoCleared[l.x0]);
+  const grottoOpen = l => !!(l && l.grotto && !session.state.grottoCleared[l.x0]);
 
   function enterGrotto(l) {
     const tents = [];
@@ -124,7 +124,7 @@ export function createWater({ session, viewport, systems }) {
     return out;
   }
 
-  function octoHit(hit, verb) {
+  function octoHit(hit, verb, method = 'gun') {
     const g = session.state.grotto;
     if (!g) return;
     const o = g.octo;
@@ -135,10 +135,10 @@ export function createWater({ session, viewport, systems }) {
       session.state.msg = `${verb} Tentacle hit — attack broken`; session.state.msgT = 1.5; session.state.msgTags = null;
       return;
     }
-    octoDamage(verb === 'BOOM!' ? OCTO_ROCKET_DMG : 1, verb);
+    octoDamage(verb === 'BOOM!' ? OCTO_ROCKET_DMG : 1, verb, method);
   }
 
-  function octoDamage(dmg, verb) {
+  function octoDamage(dmg, verb, method = 'talons') {
     const g = session.state.grotto, o = g.octo;
     if (o.hp <= 0) return;
     o.hp -= dmg; o.hurtT = 0.35;
@@ -154,7 +154,7 @@ export function createWater({ session, viewport, systems }) {
     }
     session.state.grottoCleared[g.lake.x0] = true;
     for (const tn of o.tents) tn.mode = 'idle';
-    systems.prey.award({ kind: 'turtle', speed: session.bird.speed, targetKind: 'octopus', stolen: true, shot: true, water: true },
+    systems.prey.award({ kind: 'turtle', speed: session.bird.speed, targetKind: 'octopus', stolen: true, shot: method === 'gun', method, water: true },
           systems.session.priceCatch('octopus', {}), 'The octopus is beaten! Swim back out (left)');
     session.state.msgT = 4;
     for (let i = 0; i < 40; i++) session.particles.push({ x: o.x, alt: o.alt, vx: (Math.random() - 0.5) * 20, vy: (Math.random() - 0.5) * 20, life: 1.4 });

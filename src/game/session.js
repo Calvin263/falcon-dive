@@ -124,6 +124,7 @@ export function createSession({ session, viewport, systems }) {
     if (o.skeet) { bonus += 1; tags.push('Skeet +100%'); }
     if (o.crossfire) { bonus += CROSSFIRE_BONUS; tags.push(`Crossfire +${CROSSFIRE_BONUS * 100}%`); }
     if (o.below) { bonus += 1; tags.push('From below +100%'); }
+    if (o.drowned) { bonus += 1; tags.push('Drowned +100%'); }
     if (o.impact != null) {
       const imp = Math.max(0, Math.floor((o.impact - SHELL_CRACK_SPEED) * 3.6 / 10)) * 0.05;
       if (imp > 0) { bonus += imp; tags.push(`Impact +${Math.round(imp * 100)}%`); }

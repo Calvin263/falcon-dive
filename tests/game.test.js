@@ -177,6 +177,154 @@ test('catch pricing preserves species values and repeat fatigue', () => {
   assert.ok(second.tags.some(tag => tag.startsWith('Repeat')));
 });
 
+test('secret upgrades and achievements give no advance hints', () => {
+  const { session, systems } = fixture();
+  const upgrades = systems.progression.shopUpgrades();
+  assert.ok(!upgrades.some(u => u.id === 'rifle' || u.id === 'eyasgun'));
+  const shell = upgrades.find(u => u.id === 'shell');
+  assert.deepEqual(systems.progression.upgradeCosts(shell), [60]);
+  assert.ok(!shell.desc.includes('rifle') && !shell.desc.includes('grotto'));
+  assert.equal(upgrades.find(u => u.id === 'aim').stat(0), 'Drop only (no aim)');
+  const hidden = ['skeet', 'drownedTurtle', 'buzzsaw', 'parry', 'kraken', 'moon', 'satellite'];
+  assert.ok(systems.progression.visibleAchievements().every(a => !hidden.includes(a.id)));
+  systems.combat.achieve('parry');
+  assert.ok(systems.progression.visibleAchievements().some(a => a.id === 'parry'));
+  session.progress.gunFound = true;
+  assert.deepEqual(systems.progression.upgradeCosts(shell), [60, 200]);
+  assert.ok(!shell.stat(2).includes('rifle'));
+  session.progress.up.shell = 2;
+  assert.equal(shell.stat(2), 'start carrying a loaded rifle');
+  assert.ok(systems.progression.shopUpgrades().some(u => u.id === 'rifle'));
+});
+
+test('grottos are random world features independent of gun progression', () => {
+  const { session, systems } = fixture();
+  const lakes = Array.from({ length: 60 }, (_, i) => systems.world.lakeAt(i));
+  assert.ok(lakes.some(l => l.on && l.grotto));
+  assert.ok(lakes.some(l => l.on && !l.grotto));
+  const lake = lakes.find(l => l.on && l.grotto);
+  assert.equal(systems.water.grottoOpen(lake), true);
+  session.state.grottoCleared[lake.x0] = true;
+  assert.equal(systems.water.grottoOpen(lake), false);
+});
+
+test('base turtles drop without aiming and the first aim upgrade adds a push', () => {
+  const { session, systems } = fixture();
+  Object.assign(session.bird, { vx: 10, vy: -5 });
+  session.mouse.x = 1000;
+  session.mouse.y = 100;
+  assert.deepEqual(systems.prey.throwVelocity(true), { vx: 10, vy: -5 });
+  session.progress.up.aim = 1;
+  const aimed = systems.prey.throwVelocity(true);
+  assert.ok(Math.hypot(aimed.vx - 10, aimed.vy + 5) > 0);
+  assert.deepEqual(systems.prey.throwVelocity(false), { vx: 10, vy: -5 });
+});
+
+test('intact turtles can be picked up immediately after every landing path', () => {
+  for (const flags of [{}, { struck: true }, { ricochets: 1 }]) {
+    const { session, systems } = fixture();
+    systems.world.lakeAtX = () => null;
+    session.prey = [];
+    Object.assign(session.bird, { x: 0, alt: 1, vx: 0, vy: 0 });
+    session.state.fallers = [{ x: 0, alt: 0.01, vx: 0, vy: -1, spin: 0, ...flags }];
+    systems.combat.updateFallers(0.1);
+    assert.equal(session.state.fallers.length, 0);
+    assert.equal(session.prey.length, 1);
+    assert.equal(session.prey[0].failCD, 0);
+    systems.prey.checkCatch(session.prey[0], 0);
+    assert.equal(session.bird.carrying.kind, 'turtle');
+  }
+});
+
+test('a turtle dropped in water sinks for a special reward and a one-time achievement', () => {
+  const { session, systems } = fixture();
+  const lake = { x0: -100, w: 200, depth: 12 };
+  systems.world.lakeAtX = () => lake;
+  session.prey = [];
+  const land = () => {
+    session.state.fallers.push({ x: 0, alt: 0.01, vx: 0, vy: -2, spin: 0 });
+    systems.combat.updateFallers(0.1);
+  };
+  land();
+  assert.equal(session.state.catchLog.length, 1);
+  assert.equal(session.state.lastCatch.drowned, true);
+  assert.equal(session.state.lastCatch.method, 'water');
+  assert.equal(session.state.lastCatch.pts, SPECIES.turtle.bounty * 2 + 10);
+  assert.equal(session.progress.ach.drownedTurtle, session.state.day);
+  assert.equal(session.progress.money, 75);
+  assert.equal(session.prey.length, 0);
+  land();
+  assert.equal(session.progress.money, 75);
+  assert.equal(session.state.catchLog.length, 2);
+});
+
+test('a grabbed falling turtle cannot also land or drown in the same frame', () => {
+  const { session, systems } = fixture();
+  Object.assign(session.bird, { x: 0, alt: 1 });
+  const turtle = { x: 0, alt: 1, vx: 0, vy: -10, spin: 0 };
+  session.state.fallers = [turtle];
+  systems.world.lakeAtX = () => ({ x0: -100, w: 200 });
+  systems.prey.grabFallingTurtle(turtle);
+  systems.combat.updateFallers(1);
+  assert.equal(session.bird.carrying.kind, 'turtle');
+  assert.equal(session.state.fallers.length, 0);
+  assert.equal(session.state.catchLog.length, 0);
+});
+
+test('land prey cannot cross lake shores in either direction, even on a large step', () => {
+  const { session, systems } = fixture();
+  const lake = Array.from({ length: 60 }, (_, i) => systems.world.lakeAt(i)).find(l => l.on);
+  assert.equal(systems.world.landStep(lake.x0 - 1, lake.x0 + lake.w + 1), lake.x0 - 0.1);
+  assert.equal(systems.world.landStep(lake.x0 + lake.w + 1, lake.x0 - 1), lake.x0 + lake.w + 0.1);
+  for (const direction of [-1, 1]) {
+    const x = direction > 0 ? lake.x0 - 0.01 : lake.x0 + lake.w + 0.01;
+    const turtle = systems.prey.makeGround(x, 'turtle');
+    turtle.vx = direction * 0.4;
+    session.bird.x = x - 100;
+    systems.prey.updateGroundPrey(turtle, 1);
+    assert.equal(systems.world.lakeAtX(turtle.x), null);
+    assert.equal(Math.sign(turtle.vx), -direction);
+  }
+});
+
+test('buzzsaw kills retain their method without becoming gun or skeet kills', () => {
+  const { session, systems } = fixture();
+  const turtle = { x: 100, alt: 20 };
+  systems.combat.takeShot({ type: 'skeet', f: turtle }, 'BUZZSAW!', 'buzzsaw');
+  assert.equal(session.state.lastCatch.method, 'buzzsaw');
+  assert.equal(session.state.lastCatch.shot, false);
+  assert.equal(session.progress.ach.skeet, undefined);
+  assert.deepEqual(systems.hud.catchCircumstances(session.state.lastCatch).map(i => i.id), ['buzzsaw']);
+  const prey = { kind: 'rabbit' };
+  systems.combat.takeShot({ type: 'prey', p: prey, m: prey }, 'SHOT!');
+  assert.deepEqual(systems.hud.catchCircumstances(session.state.lastCatch).map(i => i.id), ['gun']);
+});
+
+test('catch circumstance icons distinguish companions, crossfire, water, and theft', () => {
+  const { systems } = fixture();
+  const ids = c => systems.hud.catchCircumstances(c).map(i => i.id);
+  assert.deepEqual(ids({ eyas: true, shot: true }), ['gun', 'eyas']);
+  assert.deepEqual(ids({ crossfire: true, by: 'hunter' }), ['hunter']);
+  assert.deepEqual(ids({ crossfire: true, by: 'cat' }), ['cat']);
+  assert.deepEqual(ids({ drowned: true, water: true }), ['water']);
+  assert.deepEqual(ids({ turtleHit: true, stolenBy: 'buzzard' }), ['turtle', 'buzzard']);
+  assert.deepEqual(ids({ method: 'parry' }), ['parry']);
+  assert.deepEqual(ids({ targetKind: 'moon' }), ['moon']);
+});
+
+test('hunters can shoot buzzards crossing their line and record the killer', () => {
+  const { session, systems } = fixture();
+  Object.assign(session.bird, { x: 1000, alt: 300, vx: 0, vy: 0 });
+  const buzzard = { x: 50, alt: 20, prevX: 50, prevAlt: 0, gone: false };
+  session.state.rivals.push(buzzard);
+  const hunter = { x: 0, ax: 100, aalt: 20, aim: 0.05, reload: 0, flash: 0, tracer: 0 };
+  systems.hazards.updateHunter(hunter, 0.1);
+  assert.equal(buzzard.gone, true);
+  assert.equal(session.state.lastCatch.targetKind, 'buzzard');
+  assert.equal(session.state.lastCatch.by, 'hunter');
+  assert.equal(session.progress.ach.xcat, undefined);
+});
+
 test('storage handles corrupt data and unavailable browser storage', () => {
   const corrupt = createStorage(() => ({ getItem: () => '{invalid' }));
   assert.equal(corrupt.read('key', 42), 42);

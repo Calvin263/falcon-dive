@@ -63,38 +63,39 @@ export function createCombat({ session, viewport, systems }) {
   }
 
   // Award whatever a bullet or rocket took out
-  function takeShot(hit, verb) {
+  function takeShot(hit, verb, method = 'gun') {
+    const shot = method === 'gun';
     if (hit.type === 'prey') {
       const { p, m } = hit, s = SPECIES[p.kind];
       if (p.kind === 'flock') {
         m.caught = true; p.scatterT = 3; p.alertT = 0.8;
-        systems.prey.award({ kind: 'flock', speed: session.bird.speed, air: true, count: 1, shot: true }, systems.session.priceCatch('flock', {}), `${verb} Starling`);
+        systems.prey.award({ kind: 'flock', speed: session.bird.speed, air: true, count: 1, shot, method }, systems.session.priceCatch('flock', {}), `${verb} Starling`);
       } else {
         p.gone = true;
         const what = p.kind === 'turtle' ? 'Turtle — shell cracked' : s.name;
-        systems.prey.award({ kind: p.kind, speed: session.bird.speed, air: s.air, shot: true }, systems.session.priceCatch(p.kind, { unseen: !p.noticed }), `${verb} ${what}`);
+        systems.prey.award({ kind: p.kind, speed: session.bird.speed, air: s.air, shot, method }, systems.session.priceCatch(p.kind, { unseen: !p.noticed }), `${verb} ${what}`);
       }
     } else if (hit.type === 'buzzard') {
       const r = hit.r;
       r.gone = true; r.mode = 'leave';
-      systems.prey.award({ kind: 'turtle', speed: session.bird.speed, targetKind: 'buzzard', stolen: true, shot: true }, systems.session.priceCatch('buzzard', {}), `${verb} Buzzard`);
+      systems.prey.award({ kind: 'turtle', speed: session.bird.speed, targetKind: 'buzzard', stolen: true, shot, method }, systems.session.priceCatch('buzzard', {}), `${verb} Buzzard`);
     } else if (hit.type === 'skeet') {
       hit.f.done = true;
-      systems.prey.award({ kind: 'turtle', speed: session.bird.speed, shot: true }, systems.session.priceCatch('turtle', { skeet: true }), `${verb} Skeet shot — shell shattered`);
+      systems.prey.award({ kind: 'turtle', speed: session.bird.speed, shot, method }, systems.session.priceCatch('turtle', { skeet: shot }), `${verb} Shell shattered`);
     } else if (hit.type === 'fish') {
       const f = hit.f;
       f.gone = true;
-      systems.prey.award({ kind: f.kind, speed: session.bird.speed, water: true, shot: true, depth: -f.alt }, systems.session.priceCatch(f.kind, { unseen: !f.spooked }), `${verb} ${SPECIES[f.kind].name}`);
+      systems.prey.award({ kind: f.kind, speed: session.bird.speed, water: true, shot, method, depth: -f.alt }, systems.session.priceCatch(f.kind, { unseen: !f.spooked }), `${verb} ${SPECIES[f.kind].name}`);
     } else if (hit.type === 'octo') {
-      systems.water.octoHit(hit, verb);
+      systems.water.octoHit(hit, verb, method);
     } else if (hit.type === 'sat') {
       const s = hit.sat;
       s.down = true; s.vy = 0; s.spinV = randDir() * 2;
-      systems.prey.award({ kind: 'satellite', targetKind: 'satellite', speed: session.bird.speed, shot: true }, systems.session.priceCatch('satellite', {}), `${verb} Satellite down`);
+      systems.prey.award({ kind: 'satellite', targetKind: 'satellite', speed: session.bird.speed, shot, method }, systems.session.priceCatch('satellite', {}), `${verb} Satellite down`);
       for (let i = 0; i < 30; i++) session.particles.push({ x: s.x, alt: s.alt, vx: (Math.random() - 0.5) * 30, vy: (Math.random() - 0.5) * 30, life: 1.4 });
       session.cam.shake = Math.max(session.cam.shake, 6);
     } else {
-      systems.prey.award({ kind: 'turtle', speed: session.bird.speed, targetKind: hit.kind, stolen: true, shot: true }, systems.session.priceCatch(hit.kind, {}), `${verb} ${HAZARD_NAME[hit.kind]}`);
+      systems.prey.award({ kind: 'turtle', speed: session.bird.speed, targetKind: hit.kind, stolen: true, shot, method }, systems.session.priceCatch(hit.kind, {}), `${verb} ${HAZARD_NAME[hit.kind]}`);
       systems.prey.removeHazard(hit.kind, hit.obj);
     }
   }
@@ -288,7 +289,7 @@ export function createCombat({ session, viewport, systems }) {
     if (e.targetKind === 'satellite') achieve('satellite');
     if (has('Skeet')) achieve('skeet');
     if (has('From below') && e.kind === 'duck') achieve('below');
-    if (!e.shot && !e.turtleHit && !e.targetKind && (e.speed || 0) * 3.6 >= 300) achieve('stoop');
+    if (!e.shot && e.method !== 'buzzsaw' && !e.drowned && !e.turtleHit && !e.targetKind && (e.speed || 0) * 3.6 >= 300) achieve('stoop');
     if (systems.session.chainMult() >= CHAIN_MAX) achieve('chain');
     if (session.state.score >= 500) achieve('bigday');
     if (SPECIES[e.kind] && !e.targetKind && !session.progress.caught[e.kind]) {
@@ -376,6 +377,7 @@ export function createCombat({ session, viewport, systems }) {
 
   function updateFallers(dt) {
     for (const f of session.state.fallers) {
+      if (f.done) continue;
       f.bounced = false;
       f.vy -= G * dt;
       f.vx += (systems.world.windX(f.alt) - f.vx) * Math.min(1, dt * 0.2);
@@ -407,6 +409,7 @@ export function createCombat({ session, viewport, systems }) {
 
       if (!(f.struck && f.alt > 0 && !f.hitBuzzard)) {
         for (const r of session.state.rivals) {
+          if (r.gone) continue;
           if (Math.hypot(r.x - f.x, r.alt - f.alt) < 5) {
             buzzardStrike(f, r);
             break;
@@ -421,10 +424,18 @@ export function createCombat({ session, viewport, systems }) {
         }
       }
       if (f.alt > 0) continue;
+      const lake = systems.world.lakeAtX(f.x);
+      if (lake) {
+        f.done = true;
+        systems.water.splashAt(f.x, lake);
+        systems.prey.award({ kind: 'turtle', speed: Math.hypot(f.vx, f.vy), drowned: true, water: true, method: 'water' },
+          systems.session.priceCatch('turtle', { drowned: true }), 'Turtle sank!');
+        achieve('drownedTurtle');
+        continue;
+      }
       if (f.struck || f.hitBuzzard) {
         f.done = true;
         const t = systems.prey.makeGround(f.x, 'turtle');
-        t.failCD = 2;
         session.prey.push(t);
         continue;
       }
@@ -436,7 +447,7 @@ export function createCombat({ session, viewport, systems }) {
       // A ground hit that ricocheted is airborne again
       if (f.bounced) { f.bounced = false; f.done = false; continue; }
       // A ricochet that missed its next target just lands; the turtle walks off
-      if (f.ricochets) { const t = systems.prey.makeGround(f.x, 'turtle'); t.failCD = 2; session.prey.push(t); continue; }
+      if (f.ricochets) { const t = systems.prey.makeGround(f.x, 'turtle'); session.prey.push(t); continue; }
       const impact = Math.hypot(f.vx, f.vy);
       if (impact >= SHELL_CRACK_SPEED) {
         systems.prey.award({ kind: 'turtle', speed: impact, drop: f.dropAlt }, systems.session.priceCatch('turtle', { impact }), 'Shell cracked!');
@@ -445,7 +456,6 @@ export function createCombat({ session, viewport, systems }) {
         });
       } else {
         const t = systems.prey.makeGround(f.x, 'turtle');
-        t.failCD = 2;
         session.prey.push(t);
         if (!f.struck) {
           session.state.msg = `Hit at ${(impact * 3.6).toFixed(0)} km/h — the turtle walked away (need ${(SHELL_CRACK_SPEED * 3.6).toFixed(0)})`;

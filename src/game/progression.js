@@ -1,4 +1,4 @@
-import { G, DRAG, SHADOW_SPOOK_RANGE, GROUND_FRAME, GROUND_SHOW_ALT, GROUND_SHOW_FADE, HIGH_CAM, UPGRADE_COSTS, STATS, AIM_LEVELS, AIM_STATS, CATSENSE, SWIM, EYAS_GUN, GUN_LEVELS, GUN_STATS, BOUNCES, CEILINGS, PROGRESS_KEY, SPRITE_REF_ZOOM, SPRITE_MIN, AIR_REACH_MAX, EYAS, LUCKY } from '../config.js';
+import { G, DRAG, SHADOW_SPOOK_RANGE, GROUND_FRAME, GROUND_SHOW_ALT, GROUND_SHOW_FADE, HIGH_CAM, UPGRADE_COSTS, STATS, AIM_LEVELS, AIM_STATS, CATSENSE, SWIM, EYAS_GUN, GUN_LEVELS, GUN_STATS, BOUNCES, CEILINGS, PROGRESS_KEY, SPRITE_REF_ZOOM, SPRITE_MIN, AIR_REACH_MAX, EYAS, LUCKY, ACHIEVEMENTS } from '../config.js';
 import { lerp, clamp } from '../core/math.js';
 
 export function createProgression({ session, viewport, systems, storage }) {
@@ -39,13 +39,13 @@ export function createProgression({ session, viewport, systems, storage }) {
       stat: t => t ? `marks hidden cats within ${CATSENSE.range[t]} m${t > 1 ? ' · shows leap reach' : ' · pounce warning'}` : 'cats stay hidden' },
     { id: 'talons', name: 'Talons', desc: 'Bigger catch window; longer turtle re-grab',
       stat: t => `ground ×${STATS.catchAlt[t]} · air reach ×${STATS.airReach[t]}` },
-    { id: 'aim', name: 'Turtle Aim', desc: 'Stronger throws, then turtles that home and ricochet', costs: [60, 160, 350], stat: t => AIM_LEVELS[t] },
+    { id: 'aim', name: 'Turtle Aim', desc: 'Aim your throws, then home and ricochet', costs: [60, 160, 350], stat: t => AIM_LEVELS[t] },
     { id: 'early', name: 'Early Riser', desc: 'Start hunting earlier in the day', costs: [75, 180, 350],
       stat: t => `start ${fmtHour(STATS.startHour[t])}` },
     // Second tier only opens once you've found a hunter's rifle (cap)
-    { id: 'shell', name: 'Head Start', desc: 'Start each day with a turtle, then with a loaded rifle (opens lake grottos)', costs: [60, 200],
-      cap: () => session.progress.gunFound ? 2 : 1, capHint: 'Find a hunter\'s rifle to unlock',
-      stat: t => ['start empty-handed', 'start carrying a turtle', 'start carrying a loaded rifle'][t] },
+    { id: 'shell', name: 'Head Start', desc: 'Start each day carrying a turtle', costs: [60, 200],
+      cap: () => session.progress.gunFound || tier('shell') >= 2 ? 2 : 1,
+      stat: t => ['start empty-handed', 'start carrying a turtle', tier('shell') >= 2 ? 'start carrying a loaded rifle' : 'better starting equipment'][t] },
     { id: 'swim', name: 'Swimming', desc: 'Hold your breath longer and swim faster underwater', costs: [50, 130, 260],
       locked: () => !session.progress.swum, stat: t => `${SWIM.breath[t]} s breath · ${SWIM.speed[t]} m/s` },
     { id: 'rifle', name: 'Rifle', desc: 'More shots, free aim, auto-fire, then a homing bazooka',
@@ -56,24 +56,25 @@ export function createProgression({ session, viewport, systems, storage }) {
     { id: 'eyasgun', name: 'Armed Eyases', desc: 'Your eyases carry rifles: they shoot prey, and hunters aiming at you', costs: [180, 380],
       locked: () => !session.progress.gunFound || !tier('eyas'),
       stat: t => t ? `${EYAS_GUN.ammo[t]} shots each · ${EYAS_GUN.range[t]} m` : 'unarmed' },
-    { id: 'lucky', name: 'Lucky Feather', desc: 'Survive a fatal attack (cat, hunter, goshawk, octopus) each day', costs: [150, 400],
+    { id: 'lucky', name: 'Lucky Feather', desc: 'Survive a fatal attack each day', costs: [150, 400],
       stat: t => `${LUCKY[t]} save${LUCKY[t] === 1 ? '' : 's'} per day` },
     { id: 'bounce', name: 'Springy Legs', desc: 'Crash into the ground and you spring back up — the faster you hit, the higher you fly',
       costs: [100, 260, 500, 1200],
       stat: t => [
         'crashes end the day',
         `${BOUNCES[1]} bounces per day`,
-        `${BOUNCES[2]} bounces · buzzsaw spin (brake to stop)`,
-        'unlimited bounces · buzzsaw spin',
-        'moon springs: every bounce in a spin chain hits harder',
+        `${BOUNCES[2]} bounces · spin (brake to stop)`,
+        'unlimited bounces · spin',
+        'stronger rebounds in a spin chain',
       ][t] },
   ];
   const shopUpgrades = () => UPGRADES.filter(u => !u.locked || !u.locked());
-  const upgradeCosts = u => u.costs || UPGRADE_COSTS;
+  const upgradeCosts = u => u.id === 'shell' && !session.progress.gunFound && tier('shell') < 2 ? u.costs.slice(0, 1) : u.costs || UPGRADE_COSTS;
   // Highest tier you can currently buy (some upgrades open later tiers once something is found)
   const upgradeCap = u => u.cap ? u.cap() : upgradeCosts(u).length;
   const bounceSpin = () => tier('bounce') >= 2;
   const moonSprings = () => tier('bounce') >= 4;
+  const visibleAchievements = () => ACHIEVEMENTS.filter(a => !a.hidden || session.progress.ach[a.id]);
   const freshProgress = () => ({ day: 1, money: 0, up: {}, best: { earned: 0, speed: 0 }, ach: {}, caught: {} });
   session.progress = freshProgress();
   function loadProgress() {
@@ -134,5 +135,5 @@ export function createProgression({ session, viewport, systems, storage }) {
   const swimBreath = () => SWIM.breath[tier('swim')];
   const swimSpeed = () => SWIM.speed[tier('swim')];
   const swimPaddle = () => SWIM.paddle[tier('swim')];
-  return { aimTier, airCatchRadius, bounceSpin, brakeDuration, brakeRecharge, buyUpgrade, dragBase, flapMaxSpeed, flapThrust, freshProgress, groundFit, groundFitZoom, groundPx, groundShowK, highCamK, loadProgress, lockScale, moonSprings, saveProgress, shadowDetectAlt, shadowInFront, shadowMaxReach, shadowWorldX, shopUpgrades, spriteK, stealWindow, swimBreath, swimPaddle, swimSpeed, talonGrabRange, throwPush, tier, todForHour, topKmh, turtleHoming, upgradeCap, upgradeCosts };
+  return { aimTier, airCatchRadius, bounceSpin, brakeDuration, brakeRecharge, buyUpgrade, dragBase, flapMaxSpeed, flapThrust, freshProgress, groundFit, groundFitZoom, groundPx, groundShowK, highCamK, loadProgress, lockScale, moonSprings, saveProgress, shadowDetectAlt, shadowInFront, shadowMaxReach, shadowWorldX, shopUpgrades, spriteK, stealWindow, swimBreath, swimPaddle, swimSpeed, talonGrabRange, throwPush, tier, todForHour, topKmh, turtleHoming, upgradeCap, upgradeCosts, visibleAchievements };
 }

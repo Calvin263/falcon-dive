@@ -195,12 +195,6 @@ test('recap, roost, persistence, and next-day flow remain playable', async ({ pa
   await expect.poll(() => page.evaluate(() => window.__falconDiveDebug.buttons.some(button => button.id === 'bounce'))).toBe(true);
   const muscles = initialShop.buttons.find(button => button.id === 'muscles');
   await page.mouse.click(muscles.x + muscles.w / 2, muscles.y + muscles.h / 2);
-  const buy = await page.evaluate(() => {
-    window.__falconDiveDebug.render();
-    const { x, y, w, h } = window.__falconDiveDebug.buttons.find(button => button.id === 'buyUpgrade');
-    return { x, y, w, h };
-  });
-  await page.mouse.click(buy.x + buy.w / 2, buy.y + buy.h / 2);
   expect(await page.evaluate(() => window.__falconDiveDebug.progress.up.muscles)).toBe(1);
   await page.reload();
   await page.waitForFunction(() => window.__falconDiveDebug?.screen === 'shop');
@@ -230,41 +224,37 @@ test('fully unlocked shop exposes every tile without scrolling or overlapping co
   });
   expect(layout.metrics.maxScroll).toBe(0);
   expect(layout.metrics.top + layout.metrics.contentHeight).toBeLessThanOrEqual(layout.metrics.bottom);
-  const tiles = layout.buttons.filter(button => button.id && !['startDay', 'buyUpgrade'].includes(button.id));
+  const tiles = layout.buttons.filter(button => button.id && button.id !== 'startDay');
   expect(tiles).toHaveLength(18);
+  expect(layout.buttons.some(button => button.id === 'buyUpgrade')).toBe(false);
   for (const tile of tiles) {
     expect(tile.x).toBeGreaterThanOrEqual(0);
     expect(tile.x + tile.w).toBeLessThanOrEqual(page.viewportSize().width);
     expect(tile.y).toBeGreaterThanOrEqual(layout.metrics.top);
     expect(tile.y + tile.h).toBeLessThanOrEqual(layout.metrics.bottom);
+    const before = await page.evaluate(id => {
+      const game = window.__falconDiveDebug;
+      return { tier: game.progress.up[id] || 0, money: game.progress.money };
+    }, tile.id);
     await page.mouse.click(tile.x + tile.w / 2, tile.y + tile.h / 2);
-    const selection = await page.evaluate(() => {
+    const purchase = await page.evaluate(({ id, x, y, h }) => {
       const game = window.__falconDiveDebug;
       const ctx = document.querySelector('#hud-overlay').getContext('2d');
       const original = ctx.fillText;
       const text = [];
-      let inShop = false;
-      const metrics = game.shopMetrics;
-      const detailTop = metrics.top + metrics.rows * (metrics.tileHeight + metrics.gap);
-      ctx.fillText = function (label, x, y, ...args) {
-        if (label === 'The Roost') inShop = true;
-        if (inShop && y > detailTop && y < detailTop + metrics.detailHeight && !String(label).startsWith('Buy $')) {
-          text.push({ label: String(label), y, width: this.measureText(label).width });
-        }
-        return original.call(this, label, x, y, ...args);
+      ctx.fillText = function (label, tx, ty, ...args) {
+        if (tx >= x && ty > y && ty < y + h) text.push(String(label));
+        return original.call(this, label, tx, ty, ...args);
       };
       try { game.render(); } finally { ctx.fillText = original; }
-      const buy = game.buttons.find(button => button.id === 'buyUpgrade');
-      return { id: game.session.shopSelection, buy: buy.enabled, text, buyY: buy.y };
-    });
-    expect(selection.id).toBe(tile.id);
-    expect(selection.buy).toBe(true);
-    expect(selection.text.some(item => item.label.startsWith('Now:'))).toBe(true);
-    expect(selection.text.some(item => item.label.startsWith('Next:'))).toBe(true);
-    for (const text of selection.text) {
-      expect(text.y).toBeLessThan(selection.buyY - 5);
-      expect(text.width).toBeLessThanOrEqual(page.viewportSize().width - 56);
-    }
+      return { tier: game.progress.up[id], money: game.progress.money, text,
+        savedTier: JSON.parse(localStorage.getItem('falconDive.progress')).up[id] };
+    }, tile);
+    expect(purchase.tier).toBe(before.tier + 1);
+    expect(purchase.savedTier).toBe(purchase.tier);
+    expect(purchase.money).toBeLessThan(before.money);
+    expect(purchase.text.some(label => label.startsWith('Now:'))).toBe(true);
+    expect(purchase.text.some(label => label.startsWith('Next:') || label === 'Fully upgraded')).toBe(true);
   }
   for (const [i, a] of layout.buttons.entries()) {
     for (const b of layout.buttons.slice(i + 1)) {
@@ -274,6 +264,141 @@ test('fully unlocked shop exposes every tile without scrolling or overlapping co
   await page.mouse.wheel(0, 1000);
   expect(await page.evaluate(() => window.__falconDiveDebug.session.shopScroll)).toBe(0);
   await page.screenshot({ path: testInfo.outputPath('roost-all-upgrades.png') });
+});
+
+test('left-click cancels turtle and gun aiming without throwing or firing', async ({ page }) => {
+  for (const carrying of [{ kind: 'turtle' }, { kind: 'gun', ammo: 6 }]) {
+    await page.evaluate(item => {
+      const game = window.__falconDiveDebug;
+      game.progress.up.aim = 1;
+      game.progress.up.rifle = 2;
+      game.startDay();
+      game.bird.carrying = item;
+    }, carrying);
+    await page.mouse.move(page.viewportSize().width * 0.7, 150);
+    await page.mouse.down({ button: 'right' });
+    expect(await page.evaluate(() => window.__falconDiveDebug.session.mouse.aiming)).toBe(true);
+    await page.mouse.down({ button: 'left' });
+    expect(await page.evaluate(() => ({
+      aiming: window.__falconDiveDebug.session.mouse.aiming,
+      steer: window.__falconDiveDebug.session.mouse.steer,
+      braking: window.__falconDiveDebug.session.mouse.down,
+    }))).toEqual({ aiming: false, steer: null, braking: true });
+    await page.mouse.up({ button: 'left' });
+    await page.mouse.up({ button: 'right' });
+    const result = await page.evaluate(() => ({
+      carrying: window.__falconDiveDebug.bird.carrying,
+      fallers: window.__falconDiveDebug.state.fallers.length,
+      tracers: window.__falconDiveDebug.state.tracers.length,
+    }));
+    expect(result.carrying.kind).toBe(carrying.kind);
+    if (carrying.ammo) expect(result.carrying.ammo).toBe(carrying.ammo);
+    expect(result.fallers).toBe(0);
+    expect(result.tracers).toBe(0);
+  }
+});
+
+test('undiscovered secrets are absent from roost and achievements', async ({ page }) => {
+  const capture = async achievements => page.evaluate(showAchievements => {
+    const game = window.__falconDiveDebug;
+    game.resetProgress();
+    game.progress.up.bounce = 4;
+    game.showShop();
+    game.session.achView = showAchievements;
+    const ctx = document.querySelector('#hud-overlay').getContext('2d');
+    const original = ctx.fillText, text = [];
+    ctx.fillText = function (label, ...args) {
+      text.push(String(label));
+      return original.call(this, label, ...args);
+    };
+    try { game.render(); } finally { ctx.fillText = original; }
+    return text.join(' ');
+  }, achievements);
+  for (const achievements of [false, true]) {
+    const text = await capture(achievements);
+    expect(text).not.toMatch(/moon|grotto|rifle|bazooka|buzzsaw|parry|satellite|sink or shell|Pull!/i);
+    expect(text).not.toMatch(/Find a hunter/);
+    expect(text).not.toMatch(/Achievements \d+\//);
+  }
+});
+
+test('braking cancels automatic fire and a pending turtle grab', async ({ page }) => {
+  const result = await page.evaluate(() => {
+    const game = window.__falconDiveDebug;
+    const canvas = document.querySelector('#game');
+    game.progress.up.rifle = 4;
+    game.startDay();
+    game.bird.carrying = { kind: 'gun', ammo: 30 };
+    const press = button => canvas.dispatchEvent(new MouseEvent('mousedown', { button, clientX: 200, clientY: 150 }));
+    const release = button => window.dispatchEvent(new MouseEvent('mouseup', { button }));
+    press(2);
+    press(0);
+    release(0);
+    game.step();
+    release(2);
+    const ammo = game.bird.carrying.ammo;
+    game.bird.carrying = null;
+    const turtle = { x: game.bird.x + 1, alt: game.bird.alt, vx: 0, vy: 0, spin: 0 };
+    game.state.fallers = [turtle];
+    press(2);
+    const targeted = game.session.mouse.talonTarget === turtle;
+    press(0);
+    game.step();
+    release(2);
+    release(0);
+    return { ammo, targeted, carrying: game.bird.carrying, target: game.session.mouse.talonTarget };
+  });
+  expect(result).toEqual({ ammo: 30, targeted: true, carrying: null, target: null });
+});
+
+test('catch cards show circumstance icons and recap keeps different kill methods separate', async ({ page }, testInfo) => {
+  const result = await page.evaluate(() => {
+    const game = window.__falconDiveDebug;
+    game.startDay();
+    game.session.paused = true;
+    const ctx = document.querySelector('#hud-overlay').getContext('2d');
+    const original = ctx.fillText;
+    const records = [
+      { turtleHit: true, icon: '🐢', label: 'Turtle strike' },
+      { method: 'buzzsaw', icon: '✹', label: 'Buzzsaw' },
+      { shot: true, icon: '⊕', label: 'Shot' },
+      { drowned: true, water: true, icon: '💧', label: 'Drowned' },
+      { eyas: true, icon: '🐣', label: 'Eyas' },
+      { crossfire: true, by: 'hunter', icon: '🎯', label: 'Shot by hunter' },
+      { crossfire: true, by: 'cat', icon: '🐈', label: 'Caught by cat' },
+      { method: 'parry', icon: '🛡', label: 'Parry' },
+    ];
+    const captures = [];
+    let text = [];
+    ctx.fillText = function (label, x, y, ...args) {
+      text.push(String(label));
+      return original.call(this, label, x, y, ...args);
+    };
+    try {
+      for (const record of records) {
+        game.state.catchLog = [{ kind: 'rabbit', speed: 20, pts: 120, t: 0, tags: ['Fresh +$10'], ...record }];
+        text = [];
+        game.render();
+        captures.push({ icon: record.icon, label: record.label, text });
+      }
+      game.state.catchLog = records.slice(0, 3).map(record => ({ kind: 'rabbit', speed: 20, pts: 120, t: 0, tags: [], ...record }));
+      game.endDay('sunset');
+      game.showRecap();
+      text = [];
+      game.render();
+      return { captures, recap: text };
+    } finally { ctx.fillText = original; }
+  });
+  for (const { icon, label, text } of result.captures) {
+    expect(text).toContain('Rabbit');
+    expect(text).toContain('$120');
+    expect(text.some(item => item.includes(icon))).toBe(true);
+    expect(text.some(item => item.includes(label))).toBe(true);
+    expect(text).toContain('Fresh +$10');
+  }
+  expect(result.recap.filter(item => item.startsWith('Rabbit') && item.includes('×1'))).toHaveLength(3);
+  for (const icon of ['🐢', '✹', '⊕']) expect(result.recap).toContain(icon);
+  await page.screenshot({ path: testInfo.outputPath('recap-circumstances.png') });
 });
 
 test('speedometer stays bottom-left and horizontal focus shows energy and lock state', async ({ page }, testInfo) => {
@@ -407,7 +532,7 @@ test('recent catch names and all modifiers wrap separately from warnings and exp
     ctx.fillText = function (label, x, y, ...args) {
       const width = this.measureText(label).width;
       const left = this.textAlign === 'center' ? x - width / 2 : this.textAlign === 'right' ? x - width : x;
-      text.push({ label: String(label), y, left, right: left + width });
+      text.push({ label: String(label), y, left, right: left + width, centered: this.textAlign === 'center' });
       return original.call(this, label, x, y, ...args);
     };
     try {
@@ -428,7 +553,7 @@ test('recent catch names and all modifiers wrap separately from warnings and exp
   const warning = result.active.find(item => item.label.includes('goshawk is hunting'));
   const unlock = result.active.filter(item => /New upgrade|Roost: Rifle/.test(item.label));
   expect(heading.y).toBeGreaterThan(Math.max(warning.y, ...unlock.map(item => item.y)) + 17);
-  const modifiers = result.active.filter(item => result.tags.some(tag => item.label.includes(tag)));
+  const modifiers = result.active.filter(item => item.centered && result.tags.some(tag => item.label.includes(tag)));
   expect(modifiers.map(item => item.label).join(' ')).toContain(result.tags.join(' · '));
   for (const line of [heading, ...modifiers]) {
     expect(line.left).toBeGreaterThanOrEqual(16);
@@ -439,7 +564,7 @@ test('recent catch names and all modifiers wrap separately from warnings and exp
   expect(lastModifierY).toBeGreaterThan(heading.y);
   const ammo = result.active.find(item => item.label.startsWith('Eyas ammo:'));
   expect(ammo.y).toBeGreaterThan(lastModifierY + 17);
-  expect(result.expired.some(item => item.label.includes('TURTLE STRIKE!') || item.label.includes('Double ricochet'))).toBe(false);
+  expect(result.expired.some(item => item.centered && (item.label.includes('TURTLE STRIKE!') || item.label.includes('Double ricochet')))).toBe(false);
   expect(result.expired.some(item => item.label.includes('goshawk is hunting'))).toBe(true);
   await page.screenshot({ path: testInfo.outputPath('recent-catch-feedback.png') });
 });
@@ -468,7 +593,7 @@ test('right-side statuses stay below a busy catch log and inside the viewport', 
         return originalText.call(this, label, x, y, ...args);
       };
       ctx.fillRect = function (x, y, w, h) {
-        if (w === 92 && h === 50) cards.push({ x, y, w, h });
+        if (w === 170 && h === 78) cards.push({ x, y, w, h });
         return originalRect.call(this, x, y, w, h);
       };
       try { game.render(); } finally { textCtx.fillText = originalText; ctx.fillRect = originalRect; }

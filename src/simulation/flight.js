@@ -320,8 +320,8 @@ export function createFlight({ session, viewport, systems }) {
         session.state.bestLaunch = Math.max(session.state.bestLaunch || 0, bvy);
         const left = session.state.bounces === Infinity ? '' : session.state.bounces ? ` (${session.state.bounces} left)` : ' (last one!)';
         session.state.msg = systems.progression.moonSprings() && session.bird.bouncing.spin
-          ? `BOING ×${chain + 1}! ${Math.round(bvy * 3.6)} km/h up — ${Math.round(ESCAPE_V * 3.6)} reaches the moon`
-          : `BOING!${session.bird.bouncing.spin ? ' Buzzsaw spin — brake to recover' : ''}${left}`;
+          ? `BOING ×${chain + 1}! ${Math.round(bvy * 3.6)} km/h up`
+          : `BOING!${session.bird.bouncing.spin ? ' Spinning — brake to recover' : ''}${left}`;
         session.state.msgT = 2; session.state.msgTags = null;
         for (let i = 0; i < 24; i++) session.particles.push({ x: session.bird.x, alt: 0.3, vx: (Math.random() - 0.5) * 16, vy: Math.random() * 8, life: 0.9 });
         if (systems.progression.moonSprings() && session.bird.bouncing.spin && bvy >= ESCAPE_V) startMoonshot();
@@ -352,7 +352,7 @@ export function createFlight({ session, viewport, systems }) {
     if (session.bird.bouncing && session.bird.bouncing.spin) {
       for (const [x, alt, , hit] of systems.combat.gunTargets()) {
         if (hit.type === 'fish' || Math.hypot(x - session.bird.x, alt - session.bird.alt) > SPIN_R) continue;
-        systems.combat.takeShot(hit, 'BUZZSAW!');
+        systems.combat.takeShot(hit, 'BUZZSAW!', 'buzzsaw');
         systems.combat.achieve('buzzsaw');
         for (let i = 0; i < 14; i++) session.particles.push({ x, alt: Math.max(0.5, alt), vx: (Math.random() - 0.5) * 20, vy: Math.random() * 12, life: 0.9 });
       }

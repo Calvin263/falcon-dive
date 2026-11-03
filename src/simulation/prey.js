@@ -301,8 +301,14 @@ export function createPrey({ session, viewport, systems }) {
     }
     if (vx !== 0) p.face = vx;
     vx *= turnAlign(p, vx);
+    const nextX = systems.world.landStep(p.x, p.x + vx * dt);
+    if (nextX !== p.x + vx * dt) {
+      p.vx = -p.vx;
+      p.dir = -(p.dir || Math.sign(vx) || 1);
+      vx = dt ? (nextX - p.x) / dt : 0;
+    }
     p.curVx = vx;
-    p.x += vx * dt;
+    p.x = nextX;
   }
 
   function spookAir(p) {
@@ -477,7 +483,7 @@ export function createPrey({ session, viewport, systems }) {
   // Release velocity: the bird's own, plus (when aimed) a push toward the cursor
   function throwVelocity(aimed) {
     let vx = session.bird.vx, vy = session.bird.vy;
-    if (aimed) {
+    if (aimed && systems.progression.aimTier() > 0) {
       const ax = session.cam.x + (session.mouse.x - viewport.W / 2) / session.cam.zoom - session.bird.x;
       const ay = session.cam.alt + (viewport.H / 2 - session.mouse.y) / session.cam.zoomY - session.bird.alt;
       const d = Math.hypot(ax, ay) || 1, push = Math.min(systems.progression.throwPush(), d * 0.2 * systems.progression.throwPush() / TURTLE_THROW);
@@ -618,7 +624,6 @@ export function createPrey({ session, viewport, systems }) {
     if (kind === 'hawk') { hz.hawk = null; hz.hawkT = Math.max(hz.hawkT, 45); }
     if (kind === 'hunter') {
       session.state.guns.push({ x: obj.x, alt: 1.5, vx: (Math.random() - 0.5) * 8, vy: GUN_THROW_VY, ammo: systems.combat.gunStat('ammo') });
-      if (!session.progress.gunFound) systems.combat.toast('Hunter down — catch the dropped rifle!', 3);
     }
     for (let i = 0; i < 20; i++) session.particles.push({
       x: obj.x, alt: Math.max(0.5, obj.alt || 1), vx: (Math.random() - 0.5) * 18, vy: Math.random() * 12, life: 1.1

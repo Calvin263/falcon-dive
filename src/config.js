@@ -53,20 +53,21 @@ export const ACHIEVEMENTS = [
   { id: 'aeschylus', name: 'Aeschylus', desc: 'Hit prey with a falling turtle', reward: 25 },
   { id: 'shellshock', name: 'Shell Shock', desc: 'Take out a predator with a turtle', reward: 60 },
   { id: 'tables', name: 'Turn the Tables', desc: 'Take out a hunter', reward: 50 },
-  { id: 'skeet', name: 'Pull!', desc: 'Shoot a turtle out of the air', reward: 50 },
+  { id: 'skeet', name: 'Pull!', desc: 'Shoot a turtle out of the air', reward: 50, hidden: true },
+  { id: 'drownedTurtle', name: 'Sink or Shell', desc: 'Drop a turtle into a lake', reward: 75, hidden: true },
   { id: 'stoop', name: 'Terminal Velocity', desc: 'Catch prey at 300+ km/h', reward: 60 },
   { id: 'chain', name: 'Chain Reaction', desc: `Reach a ×${CHAIN_MAX.toFixed(1)} chain`, reward: 60 },
   { id: 'below', name: 'From the Deep', desc: 'Catch a duck from underwater', reward: 60 },
-  { id: 'buzzsaw', name: 'Buzzsaw', desc: 'Take something out while spinning', reward: 50 },
-  { id: 'parry', name: 'Parry', desc: 'Deflect a hunter\'s bullet with the buzzsaw spin', reward: 120 },
+  { id: 'buzzsaw', name: 'Buzzsaw', desc: 'Take something out while spinning', reward: 50, hidden: true },
+  { id: 'parry', name: 'Parry', desc: 'Deflect a hunter\'s bullet with the buzzsaw spin', reward: 120, hidden: true },
   { id: 'xhawk', name: 'Friendly Fire', desc: 'Lead the goshawk hunting you into a hunter\'s shot', reward: 150 },
   { id: 'xcat', name: 'Wrong Target', desc: 'Get a hunter to shoot a cat', reward: 120 },
   { id: 'cathawk', name: 'Cat Among the Hawks', desc: 'Lure the goshawk into a cat\'s pounce', reward: 150 },
-  { id: 'kraken', name: 'Kraken Slayer', desc: 'Beat the octopus in its grotto', reward: 150 },
+  { id: 'kraken', name: 'Kraken Slayer', desc: 'Beat the octopus in its grotto', reward: 150, hidden: true },
   { id: 'bigday', name: 'Big Day', desc: 'Earn $500 in one day', reward: 100 },
   { id: 'naturalist', name: 'Naturalist', desc: 'Catch every species at least once', reward: 250 },
-  { id: 'moon', name: 'Fly Me to the Moon', desc: 'Bounce fast enough to reach the moon', reward: 1000 },
-  { id: 'satellite', name: 'Space Junk', desc: 'Shoot down the satellite hidden above the ceiling', reward: 300 },
+  { id: 'moon', name: 'Fly Me to the Moon', desc: 'Bounce fast enough to reach the moon', reward: 1000, hidden: true },
+  { id: 'satellite', name: 'Space Junk', desc: 'Shoot down the satellite hidden above the ceiling', reward: 300, hidden: true },
 ];
 export const UPGRADE_COSTS = [40, 100, 220, 450];
 // Per-tier stat tables (index = tier)
@@ -87,9 +88,8 @@ export const STATS = {
   airReach:   [1, 1.15, 1.3, 1.45, 1.6],        // air strike radius multiplier
   startHour:  [8, 7, 6.5, 6],
 };
-// Hold-right-click aiming is always available; the track improves the throw itself
-export const AIM_LEVELS = ['Aimed throw', 'Strong throw (1.8× push)', 'Homing turtle (locks & homes)', 'Ricochet (bounces to 2 more targets)'];
-export const AIM_STATS = { push: [10, 18, 18, 18], homing: [0, 0, 16, 22], lock: [0, 0, 1.6, 2], bounces: [0, 0, 0, 2] };
+export const AIM_LEVELS = ['Drop only (no aim)', 'Aimed throw (18 m/s push)', 'Homing turtle (locks & homes)', 'Ricochet (bounces to 2 more targets)'];
+export const AIM_STATS = { push: [0, 18, 18, 18], homing: [0, 0, 16, 22], lock: [0, 0, 1.6, 2], bounces: [0, 0, 0, 2] };
 // Cat Sense: hidden cats within range are marked; tier 2 also shows how far they can leap
 export const CATSENSE = { range: [0, 140, 300] };
 // Swimming (unlocked once you've been in a lake): breath (s), swim speed (m/s), paddle acceleration (m/s²)

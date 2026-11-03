@@ -161,6 +161,16 @@ export function createWorld({ session, viewport, systems }) {
     }
     return null;
   }
+  function landStep(from, to) {
+    const lo = Math.min(from, to), hi = Math.max(from, to);
+    let stop = to;
+    for (let i = Math.floor((lo - 400) / LAKE_SPACING) - 1; i <= Math.floor((hi - 400) / LAKE_SPACING); i++) {
+      const l = lakeAt(i);
+      if (!l.on || hi < l.x0 || lo > l.x0 + l.w) continue;
+      stop = to > from ? Math.min(stop, l.x0 - 0.1) : Math.max(stop, l.x0 + l.w + 0.1);
+    }
+    return stop;
+  }
 
   function makeCumulus(x, seed, size = 1) {
     return { x, seed, base: CLOUD_BASE + (systems.world.wh(seed) - 0.5) * 40,
@@ -187,5 +197,5 @@ export function createWorld({ session, viewport, systems }) {
   }
   const wh = n => hash(n + session.worldSeed);
 
-  return { wh, clockText, cumulusIn, daylight, devilFade, insideCloud, lakeAt, lakeAtX, ridgeAt, shadowOffset, sinkCol, sunPhase, thermalCol, twilight, updateWeather, updateWind, updraft, windX, getCacheStats: terrainCache.getStats };
+  return { wh, clockText, cumulusIn, daylight, devilFade, insideCloud, lakeAt, lakeAtX, landStep, ridgeAt, shadowOffset, sinkCol, sunPhase, thermalCol, twilight, updateWeather, updateWind, updraft, windX, getCacheStats: terrainCache.getStats };
 }

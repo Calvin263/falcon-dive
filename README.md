@@ -40,11 +40,13 @@ Existing `falconDive.progress` and `falconDive.settings` storage keys and legacy
 
 ## Interface
 
-- The Roost shows a compact upgrade grid without scrolling. Select a tile to read its description, current/next stats, and unlock requirements; use Buy to purchase.
-- A right-side status panel beneath the catch log groups weapon ammo, eyas hunting status and remaining shots, lucky-feather saves, and bounces. The log limits visible cards to keep the panel on-screen; older catches remain available in the recap.
+- The Roost shows a compact upgrade grid without scrolling. Each tile shows current/next stats and its price; click an affordable tile to buy immediately.
+- A right-side status panel beneath the catch log groups discovered equipment, eyas hunting status, lucky-feather saves, and bounces. Catch cards show names, earnings, speed, modifiers, and circumstance icons; the recap preserves these distinctions.
 - The speedometer is anchored bottom-left, with a horizontal focus meter below it. The meter turns red when locked and marks the recovery threshold.
 - Recent catches show their name, earnings, and applied modifiers in a compact, wrapping upper-screen panel for four seconds. Flock combos update the same panel; warnings and unlock banners remain separate. Full catch history stays in the catch log/recap. Eyas calls update the status badge.
 - Gameplay notices wrap near the top of the screen. Achievement and unlock banners queue without replacing an active banner; repeated queued notices are deduplicated.
+- Hold right-click to aim after buying Turtle Aim; left-click while aiming cancels the action and brakes without releasing the carried item. Intact turtles can be picked up as soon as they land. Land animals turn back at lake shores; ducks can paddle.
+- Undiscovered secrets are omitted from achievement lists and progression hints rather than shown as locked goals.
 
 ## Verify
 
