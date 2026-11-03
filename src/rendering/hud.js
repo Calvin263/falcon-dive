@@ -1,4 +1,4 @@
-import { G, DIVE_SPEED, SAFE_VSPEED, CRASH_REVEAL_DELAY, BRAKE_UNLOCK, SHELL_CRACK_SPEED, LENS_R, PAUSE_BTN, DUSK_WARN_HOUR, CHAIN_TIME, ESCAPE_V, SPECIES, HAZARD_NAME, ICON_SCALE, OUTLINE } from '../config.js';
+import { G, DIVE_SPEED, SAFE_VSPEED, CRASH_REVEAL_DELAY, BRAKE_UNLOCK, SHELL_CRACK_SPEED, LENS_R, PAUSE_BTN, CHAIN_TIME, SPECIES, HAZARD_NAME, ICON_SCALE, OUTLINE, LUCKY, BOUNCES, EYAS_GUN } from '../config.js';
 import { wrapText } from './text.js';
 
 export function createHud({ session, viewport, systems }) {
@@ -114,6 +114,7 @@ export function createHud({ session, viewport, systems }) {
     viewport.ctx.fillRect(mx + 24, ay - 10, altW, 20);
     viewport.ctx.fillStyle = session.bird.alt > session.MAX_ALT ? '#66ccff' : '#ffdd55'; viewport.ctx.textAlign = 'left';
     viewport.ctx.fillText(altLabel, mx + 29, ay + 4);
+    drawResources(Math.max(100, noticeBottom + 12));
 
     if (session.bird.carrying && session.bird.carrying.kind !== 'gun') {
       // Marker: the lowest altitude from which a release at your current speed would still crack the shell
@@ -134,10 +135,13 @@ export function createHud({ session, viewport, systems }) {
     const perkLines = perks.map(([text, color]) => [wrapText(viewport.ctx, text, 154), color]);
     const perkHeight = perkLines.reduce((height, [lines]) => height + lines.length * 16 + 10, 0);
     const ammoHeight = gunHeld ? (narrow ? 38 : 142) : 0;
-    const logBottom = drawCatchLog(noticeBottom, perkHeight + ammoHeight);
+    const eyases = systems.progression.tier('eyasgun') || session.state.eyases.some(e => e.ammo > 0) ? session.state.eyases : [];
+    const eyasHeight = eyases.length * 52;
+    const logBottom = drawCatchLog(noticeBottom, perkHeight + ammoHeight + eyasHeight);
     const panelX = viewport.W - 184, panelY = Math.max(noticeBottom + 12, logBottom + 12);
     if (gunHeld) drawAmmo(panelX, panelY, narrow);
     drawPerks(panelX, panelY + ammoHeight, perkLines);
+    eyases.forEach((eyas, i) => drawEyasAmmo(panelX, panelY + ammoHeight + perkHeight + i * 52, eyas, i));
 
     // Scale bar
     const barM = systems.renderer.niceStep(100 / session.cam.zoom), barPx = barM * session.cam.zoom;
@@ -152,17 +156,18 @@ export function createHud({ session, viewport, systems }) {
 
   // Notifications share a bounded upper-screen lane, leaving the bird unobscured.
   function drawHudMessages() {
-    let y = 52;
-    const width = Math.min(600, viewport.W - 32);
-    function banner(text, color) {
-      viewport.ctx.font = 'bold 13px sans-serif'; viewport.ctx.textAlign = 'center';
-      const lines = wrapText(viewport.ctx, text, width - 24);
-      const height = lines.length * 17 + 12;
-      viewport.ctx.fillStyle = 'rgba(12,20,34,0.9)';
-      viewport.ctx.fillRect((viewport.W - width) / 2, y, width, height);
+    let y = !session.state.moonshot && !session.state.over && systems.session.daySecondsLeft() <= 10 ? 110 : 52;
+    const x = 82, width = Math.min(340, viewport.W - x - 16);
+    function banner(text, color, centered = false) {
+      viewport.ctx.font = '11px sans-serif'; viewport.ctx.textAlign = centered ? 'center' : 'left';
+      const lines = wrapText(viewport.ctx, text, width - 16);
+      const height = lines.length * 14 + 8;
+      const panelWidth = Math.min(width, Math.max(...lines.map(line => viewport.ctx.measureText(line).width)) + 16);
+      viewport.ctx.fillStyle = 'rgba(12,20,34,0.45)';
+      viewport.ctx.fillRect(centered ? (viewport.W - panelWidth) / 2 : x, y, panelWidth, height);
       viewport.ctx.fillStyle = color;
-      lines.forEach((line, i) => viewport.ctx.fillText(line, viewport.W / 2, y + 20 + i * 17));
-      y += height + 6;
+      lines.forEach((line, i) => viewport.ctx.fillText(line, centered ? viewport.W / 2 : x + 8, y + 15 + i * 14));
+      y += height + 4;
     }
     if ((session.state.msgT > 0 || session.state.over) && (!session.state.crash || session.state.crash.t >= CRASH_REVEAL_DELAY) && !(session.state.moonshot && session.state.over)) {
       banner(session.state.msg, session.state.over ? '#ff7766' : '#fff');
@@ -174,37 +179,15 @@ export function createHud({ session, viewport, systems }) {
     }
     const caught = session.state.lastCatch;
     const age = caught ? session.state.time - caught.t : Infinity;
-    if (caught && age < 4 && !session.state.over) {
-      viewport.ctx.globalAlpha = Math.min(1, 4 - age);
+    if (caught && age < 2.5 && !session.state.over) {
+      viewport.ctx.globalAlpha = Math.min(1, (2.5 - age) / 0.5);
       const kind = caught.targetKind || caught.kind;
       const name = SPECIES[kind]?.name || HAZARD_NAME[kind] || 'Buzzard';
-      banner(`${caught.label || name}${caught.count > 1 ? ` ×${caught.count}` : ''}  +$${caught.pts}`, '#fff');
+      banner(`${caught.label || name}${caught.count > 1 ? ` ×${caught.count}` : ''}  +$${caught.pts}`, '#fff', true);
       if (caught.tags.length) {
-        viewport.ctx.font = '12px sans-serif'; viewport.ctx.textAlign = 'center';
-        const lines = wrapText(viewport.ctx, caught.tags.join(' · '), width - 24);
-        const height = lines.length * 17 + 12;
-        // Join the modifier rows to their catch heading, not to the warning above it.
-        y -= 6;
-        viewport.ctx.fillStyle = 'rgba(12,20,34,0.9)';
-        viewport.ctx.fillRect((viewport.W - width) / 2, y, width, height);
-        viewport.ctx.fillStyle = '#ffdd55';
-        lines.forEach((line, i) => viewport.ctx.fillText(line, viewport.W / 2, y + 17 + i * 17));
-        y += height + 6;
+        banner(caught.tags.join(' · '), '#ffdd55', true);
       }
       viewport.ctx.globalAlpha = 1;
-    }
-    if (y === 52 && !session.state.over && session.bird.carrying) {
-      if (session.bird.carrying.kind === 'gun') {
-        banner(systems.combat.gunAuto() ? 'Right-click: spray · Space: drop' : systems.combat.gunFreeAim()
-          ? 'Right-click: aim, release: fire · Space: drop'
-          : 'Right-click, release: fire ahead · Space: drop', '#ffdd55');
-      } else {
-        const impact = systems.combat.predictImpact(session.bird.alt, session.bird.vx, session.bird.vy);
-        const ready = impact >= SHELL_CRACK_SPEED;
-        const est = systems.session.priceCatch('turtle', { impact }, true).value;
-        banner(ready ? `Turtle ready · ~$${est} · Right-click: ${systems.progression.aimTier() ? 'aim / throw' : 'drop'} · Space: drop`
-          : `Turtle: ${(impact * 3.6).toFixed(0)}/${(SHELL_CRACK_SPEED * 3.6).toFixed(0)} km/h impact · Climb or dive faster`, ready ? '#7fd67f' : '#fff');
-      }
     }
     return y;
   }
@@ -212,20 +195,79 @@ export function createHud({ session, viewport, systems }) {
   // Small badges for the whacky upgrades: eyas call state, lucky feathers and bounces left
   function perkRows() {
     const rows = [];
-    if (systems.progression.tier('lucky')) rows.push([`Lucky feather ×${session.state.feathers}`, session.state.feathers ? '#fff1b8' : '#9aa7b8']);
-    if (systems.progression.tier('bounce')) rows.push([session.state.bounces === Infinity ? 'Springy legs ∞' : `Springy legs ×${session.state.bounces}`, session.state.bounces ? '#b8f1c8' : '#9aa7b8']);
-    if (session.progress.moon && systems.progression.moonSprings()) {
-      const chain = session.bird.bouncing && session.bird.bouncing.spin ? session.bird.bouncing.chain + 1 : 0;
-      rows.push([`🌕 Launch ${Math.round(session.state.bestLaunch * 3.6)}/${Math.round(ESCAPE_V * 3.6)} km/h${chain ? ` · ×${chain}` : ''}`, '#ffe9a8']);
+    if (session.bird.carrying?.kind === 'gun') {
+      rows.push([systems.combat.gunAuto() ? 'Right-click: spray' : systems.combat.gunFreeAim()
+        ? 'Right-click: aim / release to fire' : 'Right-click: release to fire ahead', '#ffdd55']);
+      rows.push(['Space: drop', '#9aa7b8']);
+    } else if (session.bird.carrying) {
+      const impact = systems.combat.predictImpact(session.bird.alt, session.bird.vx, session.bird.vy);
+      const ready = impact >= SHELL_CRACK_SPEED;
+      const est = systems.session.priceCatch('turtle', { impact }, true).value;
+      rows.push([ready ? `Turtle ready · ~$${est}` : `Turtle impact: ${Math.round(impact * 3.6)}/${Math.round(SHELL_CRACK_SPEED * 3.6)} km/h`, ready ? '#7fd67f' : '#fff']);
+      rows.push([`Right-click: ${systems.progression.aimTier() ? 'aim / throw' : 'drop'} · Space: drop`, '#9aa7b8']);
     }
     if (systems.progression.tier('eyas') && session.state.eyases) {
       const hunting = session.state.eyases.filter(e => e.mode === 'chase').length;
       rows.push([session.state.eyasHunt ? `E · Eyases hunting${hunting ? ` (${hunting} out)` : ''}` : 'E · Eyases held back', session.state.eyasHunt ? '#d9a46a' : '#9aa7b8']);
-      if (systems.progression.tier('eyasgun') || session.state.eyases.some(e => e.ammo > 0)) {
-        rows.push([`Eyas ammo: ${session.state.eyases.map(e => e.ammo).join(' / ')}`, session.state.eyases.some(e => e.ammo > 0) ? '#ffdd55' : '#9aa7b8']);
-      }
     }
     return rows;
+  }
+
+  function drawResources(y) {
+    const x = 132;
+    const feathers = LUCKY[systems.progression.tier('lucky')];
+    const bounces = BOUNCES[systems.progression.tier('bounce')];
+    const total = feathers + (bounces === Infinity ? 1 : bounces);
+    if (!total) return;
+    viewport.ctx.fillStyle = 'rgba(12,20,34,0.45)';
+    viewport.ctx.fillRect(x - 14, y - 14, 28, total * 28 + (feathers && bounces ? 8 : 0) + (bounces === Infinity ? 16 : 0));
+    for (let i = 0; i < feathers; i++, y += 28) {
+      const available = i < session.state.feathers;
+      viewport.ctx.fillStyle = available ? '#fff1b8' : '#687381';
+      viewport.ctx.strokeStyle = available ? '#d9a74a' : '#414b57';
+      viewport.ctx.lineWidth = 1.5;
+      viewport.ctx.beginPath(); viewport.ctx.ellipse(x, y - 2, 5, 10, 0.45, 0, Math.PI * 2); viewport.ctx.fill();
+      viewport.ctx.beginPath(); viewport.ctx.moveTo(x - 5, y + 11); viewport.ctx.lineTo(x + 4, y - 10); viewport.ctx.stroke();
+      for (let k = -1; k <= 1; k++) {
+        viewport.ctx.beginPath(); viewport.ctx.moveTo(x + k * 1.5, y - k * 4);
+        viewport.ctx.lineTo(x - 4 + k * 1.5, y - k * 4 - 3); viewport.ctx.stroke();
+      }
+    }
+    if (feathers && bounces) y += 8;
+    for (let i = 0; i < (bounces === Infinity ? 1 : bounces); i++, y += 28) {
+      viewport.ctx.strokeStyle = bounces === Infinity || i < session.state.bounces ? '#b8f1c8' : '#687381';
+      viewport.ctx.lineWidth = 2;
+      viewport.ctx.beginPath(); viewport.ctx.moveTo(x - 6, y - 10); viewport.ctx.lineTo(x + 6, y - 10);
+      for (let k = 0; k < 5; k++) viewport.ctx.lineTo(x + (k % 2 ? 6 : -6), y - 6 + k * 3);
+      viewport.ctx.lineTo(x - 6, y + 10); viewport.ctx.lineTo(x + 6, y + 10); viewport.ctx.stroke();
+      if (bounces === Infinity) {
+        viewport.ctx.fillStyle = '#b8f1c8'; viewport.ctx.font = 'bold 14px sans-serif'; viewport.ctx.textAlign = 'center';
+        viewport.ctx.fillText('∞', x, y + 27);
+      }
+    }
+  }
+
+  function drawAmmoPips(x, y, width, n, max, rocket = false) {
+    if (max <= 8) {
+      const rw = rocket ? 11 : 7, gap = 4, total = max * rw + (max - 1) * gap;
+      for (let i = 0; i < max; i++) {
+        const rx = x + (width - total) / 2 + i * (rw + gap), on = i < n;
+        viewport.ctx.fillStyle = on ? (rocket ? '#8a9a52' : '#d9a74a') : 'rgba(255,255,255,0.15)';
+        viewport.ctx.fillRect(rx, y + 4, rw, 12);
+        if (on) { viewport.ctx.fillStyle = rocket ? '#c0392b' : '#b07a2a'; viewport.ctx.fillRect(rx, y, rw, 4); }
+      }
+    } else {
+      viewport.ctx.fillStyle = 'rgba(255,255,255,0.15)'; viewport.ctx.fillRect(x + 12, y + 4, width - 24, 10);
+      viewport.ctx.fillStyle = '#d9a74a'; viewport.ctx.fillRect(x + 12, y + 4, (width - 24) * Math.min(1, n / max), 10);
+    }
+  }
+
+  function drawEyasAmmo(x, y, eyas, i) {
+    const max = Math.max(eyas.ammo, EYAS_GUN.ammo[systems.progression.tier('eyasgun')]);
+    viewport.ctx.fillStyle = 'rgba(0,0,0,0.55)'; viewport.ctx.fillRect(x, y, 170, 46);
+    viewport.ctx.fillStyle = eyas.ammo ? '#ffdd55' : '#9aa7b8'; viewport.ctx.font = 'bold 12px monospace'; viewport.ctx.textAlign = 'left';
+    viewport.ctx.fillText(`Eyas ${i + 1}: ${eyas.ammo}/${max}`, x + 8, y + 15);
+    drawAmmoPips(x, y + 23, 170, eyas.ammo, max);
   }
 
   function drawPerks(x, y, rows) {
@@ -259,18 +301,7 @@ export function createHud({ session, viewport, systems }) {
     viewport.ctx.fillStyle = '#cfe6f7'; viewport.ctx.font = '10px monospace';
     viewport.ctx.fillText(`/ ${max} ${style === 2 ? 'ROCKETS' : 'SHOTS'}`, x + w / 2, y + 88);
     const by = y + 100;
-    if (max <= 8) {
-      const rw = style === 2 ? 11 : 7, gap = 4, tot = max * rw + (max - 1) * gap;
-      for (let i = 0; i < max; i++) {
-        const rx = x + (w - tot) / 2 + i * (rw + gap), on = i < n;
-        viewport.ctx.fillStyle = on ? (style === 2 ? '#8a9a52' : '#d9a74a') : 'rgba(255,255,255,0.15)';
-        viewport.ctx.fillRect(rx, by + 6, rw, 18);
-        if (on) { viewport.ctx.fillStyle = style === 2 ? '#c0392b' : '#b07a2a'; viewport.ctx.fillRect(rx, by, rw, 6); }
-      }
-    } else {
-      viewport.ctx.fillStyle = 'rgba(255,255,255,0.15)'; viewport.ctx.fillRect(x + 12, by + 6, w - 24, 14);
-      viewport.ctx.fillStyle = '#d9a74a'; viewport.ctx.fillRect(x + 12, by + 6, (w - 24) * n / max, 14);
-    }
+    drawAmmoPips(x, by, w, n, max, style === 2);
   }
 
   function drawSpeedometer(cx, cy, r) {
@@ -539,13 +570,26 @@ export function createHud({ session, viewport, systems }) {
     // Time of day beside the pause button
     const sunUp = Math.sin(systems.world.sunPhase()) > 0;
     viewport.ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    const seconds = systems.session.daySecondsLeft();
+    const countdown = !session.state.moonshot && seconds <= 10;
+    if (countdown) {
+      const color = seconds <= 3 ? '#ff7766' : '#ffd34d';
+      viewport.ctx.save();
+      viewport.ctx.textAlign = 'center'; viewport.ctx.fillStyle = color;
+      viewport.ctx.font = 'bold 48px monospace';
+      const number = Math.ceil(seconds);
+      viewport.ctx.globalAlpha = 0.15 + 0.85 * (1 - (number - seconds));
+      viewport.ctx.strokeStyle = '#0c1422'; viewport.ctx.lineWidth = 3;
+      viewport.ctx.strokeText(String(number), viewport.W / 2, 94);
+      viewport.ctx.fillText(String(number), viewport.W / 2, 94);
+      viewport.ctx.restore();
+      return;
+    }
     viewport.ctx.fillRect(x + w + 8, y + 8, 78, 28);
     viewport.ctx.fillStyle = sunUp ? '#ffd34d' : '#cfd8ee';
     viewport.ctx.beginPath(); viewport.ctx.arc(x + w + 22, y + 22, 7, 0, Math.PI * 2); viewport.ctx.fill();
     if (!sunUp) { viewport.ctx.fillStyle = 'rgba(0,0,0,0.9)'; viewport.ctx.beginPath(); viewport.ctx.arc(x + w + 25, y + 20, 6, 0, Math.PI * 2); viewport.ctx.fill(); }
     viewport.ctx.fillStyle = '#fff'; viewport.ctx.font = 'bold 14px monospace'; viewport.ctx.textAlign = 'left';
-    // Clock pulses orange in the last half hour of the hunt
-    if (systems.session.huntHour() >= DUSK_WARN_HOUR) viewport.ctx.fillStyle = `rgba(255,${140 + Math.sin(session.state.time * 8) * 60},60,1)`;
     viewport.ctx.fillText(systems.world.clockText(), x + w + 34, y + 27);
   }
 

@@ -38,13 +38,22 @@ System factories receive `{ session, viewport, systems, storage }`. Cross-system
 
 Existing `falconDive.progress` and `falconDive.settings` storage keys and legacy upgrade migrations are preserved.
 
+## Moon flight
+
+The moon cinematic starts when the falcon reaches its current flight ceiling while moving upward at least 250 m/s, regardless of upgrades or spinning, without an escape-velocity popup. Ground collisions only initiate bounces; launch speed alone does not trigger the cinematic.
+
+## Octopus grotto
+
+The tunnel has varied rock contours and a highlighted, sealed right-hand wall; the exit remains on the left. The octopus starts nearer the entrance and retreats deeper as you approach. Head and tentacle hits add recoil, bounded before the end wall. Head damage is shown by the health bar and hit effects, without redundant hit notifications; tentacle interruption and defeat feedback remain. Rock contour variation is visual; the existing swimming corridor and air vents are unchanged.
+
 ## Interface
 
 - The Roost shows a compact upgrade grid without scrolling. Each tile shows current/next stats and its price; click an affordable tile to buy immediately.
-- A right-side status panel beneath the catch log groups discovered equipment, eyas hunting status, lucky-feather saves, and bounces. Catch cards show names, earnings, speed, modifiers, and circumstance icons; the recap preserves these distinctions.
+- A right-side status panel beneath the catch log groups discovered equipment and eyas hunting status. Each armed eyas has its own ammo count and bullet pips (or a bar for larger magazines), matching the player's ammo display. Lucky feathers and spring coils sit beside the altitude meter; used charges turn gray, and unlimited bounces show one coil with infinity. Catch cards show names, earnings, speed, modifiers, and circumstance icons; the recap preserves these distinctions.
+- During the final 10 seconds, large outlined numbers appear at top-center, fading between seconds and turning red for the final three seconds. Notices move below the countdown. It estimates real seconds at the current slow-motion rate, so slow-motion still extends the day and pausing freezes the countdown. It also appears inside grottos; falling turtles can finish landing after sunset as before.
 - The speedometer is anchored bottom-left, with a horizontal focus meter below it. The meter turns red when locked and marks the recovery threshold.
-- Recent catches show their name, earnings, and applied modifiers in a compact, wrapping upper-screen panel for four seconds. Flock combos update the same panel; warnings and unlock banners remain separate. Full catch history stays in the catch log/recap. Eyas calls update the status badge.
-- Gameplay notices wrap near the top of the screen. Achievement and unlock banners queue without replacing an active banner; repeated queued notices are deduplicated.
+- Recent catches show their name, earnings, and applied modifiers in a compact, wrapping top-center panel for 2.5 seconds. Flock combos update the same panel; notices use small text and translucent, content-sized backgrounds. Full catch history stays in the catch log/recap. Eyas calls update the status badge. The moon launch-speed tracker is not displayed.
+- Gameplay notices sit along the top-left edge beside the altitude tape. Carrying controls and turtle impact/readiness live in the equipment HUD instead of recurring popups. Bounce/recovery, predator arrival/stoop, and predator missed/gave-up messages are omitted; urgent danger uses a short label and warning icon anchored to the threat or its screen-edge position, without a flashing bottom banner. Achievement and unlock banners queue without replacing an active banner; repeated queued notices are deduplicated.
 - Hold right-click to aim after buying Turtle Aim; left-click while aiming cancels the action and brakes without releasing the carried item. Intact turtles can be picked up as soon as they land. Land animals turn back at lake shores; ducks can paddle.
 - Holding right-click empty-handed extends the falcon's gold talons, even with no nearby target. Release or brake to retract them.
 - Achievement counters include every achievement, including hidden ones. Unachieved hidden achievements show their names and "hidden achievement" as their description; actual descriptions and rewards are revealed afterward. Progression hints still omit undiscovered secrets.

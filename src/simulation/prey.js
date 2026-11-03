@@ -429,7 +429,7 @@ export function createPrey({ session, viewport, systems }) {
         p.gone = true;
         session.bird.carrying = { kind: 'turtle' };
         session.state.msg = 'Got the turtle! Drop it hard enough to crack the shell';
-        session.state.msgT = 3;
+        session.state.msgT = 2;
         return;
       }
       p.gone = true;

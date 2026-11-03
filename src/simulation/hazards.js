@@ -19,7 +19,6 @@ export function createHazards({ session, viewport, systems }) {
       const fresh = session.state.lastCatch && session.state.time - session.state.lastCatch.t < systems.progression.stealWindow() && !session.state.lastCatch.stolen && !session.state.lastCatch.eyas;
       if (r.mode === 'circle' && d < STATS.notice[systems.progression.tier('stealth')] && (session.bird.carrying || fresh)) {
         r.mode = 'chase'; r.t = 7; r.alertT = 0.8;
-        session.state.msg = 'A buzzard is after your prize!'; session.state.msgT = 2;
       }
       if (r.mode === 'chase') {
         const cs = rivalChaseSpeed();
@@ -42,7 +41,7 @@ export function createHazards({ session, viewport, systems }) {
             systems.session.breakChain();
             session.state.msg = `A buzzard stole your ${SPECIES[e.kind].name}! -$${e.pts}`;
           }
-          session.state.msgT = 2.5;
+          session.state.msgT = 2;
           r.mode = r.gun?.ammo > 0 ? 'armed' : 'leave'; r.t = 5;
         } else if (r.t <= 0 || !(session.bird.carrying || fresh)) {
           r.mode = 'return';
@@ -266,7 +265,7 @@ export function createHazards({ session, viewport, systems }) {
     if (trackedHit && !trackedHit.obj.gone &&
       (trackedHit.who === 'hawk' ? hz.hawk === trackedHit.obj : trackedHit.who === 'buzzard' ? session.state.rivals.includes(trackedHit.obj) : hz.cats.includes(trackedHit.obj))) hits.push(trackedHit);
     const first = hits.filter(o => o.d < Infinity).sort((a, b) => a.d - b.d)[0];
-    if (!first) { session.state.msg = 'A shot whizzed past!'; session.state.msgT = 2; h.tracerLen = 0; return; }
+    if (!first) { h.tracerLen = 0; return; }
     h.tracerLen = first.d;
     if (first.who !== 'bird') { crossfire(first.who, first.obj, by); return; }
     if (session.bird.bouncing && session.bird.bouncing.spin) {
@@ -296,7 +295,6 @@ export function createHazards({ session, viewport, systems }) {
                 mode: 'stalk', t: 4 + Math.random() * 2, attacks: 0, flapT: 0, alertT: 0, minD: Infinity };
     hz.hawk.prevX = hz.hawk.x;
     hz.hawk.prevAlt = hz.hawk.alt;
-    session.state.msg = 'A goshawk is hunting you!'; session.state.msgT = 2.5;
   }
 
   function updateHawk(h, dt) {
@@ -317,7 +315,6 @@ export function createHazards({ session, viewport, systems }) {
       steer(gx, gy, Math.max(32, bsp + Math.min(30, Math.hypot(gx, gy) * 0.4)), 3);
       if (h.t <= 0 && !hidden && d < HAWK_STOOP_DIST) {
         h.mode = 'stoop'; h.t = 5; h.minD = Infinity; h.alertT = 0.9;
-        session.state.msg = 'The goshawk is stooping — break away at the last moment!'; session.state.msgT = 2;
         const len = d || 1, s0 = Math.max(HAWK_SPEED * 0.8, bsp + 10);
         h.vx = dx / len * s0; h.vy = dy / len * s0;
       }
@@ -355,13 +352,12 @@ export function createHazards({ session, viewport, systems }) {
       h.minD = Math.min(h.minD, d);
       if (h.t <= 0 || hidden || (h.minD < 40 && d > h.minD + 12)) {
         h.mode = 'recover'; h.t = 2; h.attacks++; h.commit = false;
-        if (!hidden) { session.state.msg = 'The goshawk missed!'; session.state.msgT = 1.5; }
       }
     } else if (h.mode === 'recover') {
       steer(h.vx, Math.abs(h.vx) * 0.6 + 10, 30, 1.5);
       if (h.t <= 0) {
         if (h.attacks < 3 + Math.round(danger())) { h.mode = 'stalk'; h.t = 1.5 + Math.random() * 1.5; }
-        else { h.mode = 'leave'; session.state.msg = 'The goshawk gave up'; session.state.msgT = 1.5; }
+        else h.mode = 'leave';
       }
     } else {
       steer(-dx, 40, 30, 1);

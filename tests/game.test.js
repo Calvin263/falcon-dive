@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createGame } from '../src/game.js';
 import { createStorage } from '../src/core/storage.js';
-import { DEFAULT_ANIMAL_SIZES, SETTINGS_KEY, SPECIES, PROGRESS_KEY, HUNTER_AIM_T, HUNTER_RANGE } from '../src/config.js';
+import { DEFAULT_ANIMAL_SIZES, SETTINGS_KEY, SPECIES, PROGRESS_KEY, HUNTER_AIM_T, HUNTER_RANGE, ESCAPE_V, G, MOONSHOT_T, GROTTO_L, GROTTO_H, OCTO_START_X, OCTO_HP, DAY_END_HOUR, DAY_LENGTH } from '../src/config.js';
 
 function fixture(saved = {}) {
   const values = new Map(Object.entries(saved).map(([key, value]) => [key, JSON.stringify(value)]));
@@ -102,6 +102,122 @@ test('flight, braking, turtle release, and pause remain wired', () => {
   const time = session.state.time;
   systems.flight.update(1);
   assert.equal(session.state.time, time);
+});
+
+test('moon flight requires upward ceiling contact at escape speed, not total speed or upgrades', () => {
+  const dt = 1 / 120;
+  for (const { altitude, vertical, horizontal = 0, ceilingTier = 0, launches } of [
+    { altitude: -1, vertical: ESCAPE_V - 0.01, launches: false },
+    { altitude: -1, vertical: ESCAPE_V, launches: true },
+    { altitude: -1, vertical: ESCAPE_V + 1, ceilingTier: 3, launches: true },
+    { altitude: -10, vertical: ESCAPE_V + 1, launches: false },
+    { altitude: 1, vertical: ESCAPE_V + 1, launches: false },
+    { altitude: 1, vertical: -ESCAPE_V - 1, launches: false },
+    { altitude: -1, vertical: ESCAPE_V - 1, horizontal: ESCAPE_V, launches: false },
+  ]) {
+    const { session, systems, values } = fixture();
+    session.progress.up.ceiling = ceilingTier;
+    systems.session.startDay();
+    systems.progression.dragBase = () => 0;
+    systems.world.windX = () => 0;
+    systems.world.updraft = () => 0;
+    const initialVertical = vertical + G * dt;
+    Object.assign(session.bird, {
+      alt: session.MAX_ALT + altitude,
+      speed: Math.hypot(horizontal, initialVertical),
+      angle: Math.atan2(initialVertical, horizontal),
+      bouncing: null,
+    });
+    const anchor = systems.flight.birdAnchor();
+    session.mouse.x = anchor.x + horizontal;
+    session.mouse.y = anchor.y - initialVertical * session.cam.zoomY / session.cam.zoom;
+    systems.flight.update(dt);
+    assert.equal(!!session.state.moonshot, launches, JSON.stringify({ altitude, vertical, horizontal, ceilingTier }));
+    if (launches) {
+      assert.ok(!session.state.msg.includes('ESCAPE VELOCITY'));
+      assert.ok(session.state.moonshot.v0 >= ESCAPE_V);
+      systems.flight.update(MOONSHOT_T);
+      assert.equal(session.state.moonshot.landed, true);
+      assert.equal(session.progress.ach.moon, session.state.day);
+      assert.equal(session.progress.moon, session.state.day);
+      assert.equal(session.state.lastCatch.targetKind, 'moon');
+      assert.equal(JSON.parse(values.get(PROGRESS_KEY)).ach.moon, session.state.day);
+    }
+  }
+});
+
+test('fast spinning ground bounces wait for the ceiling before starting moon flight', () => {
+  const { session, systems } = fixture();
+  session.progress.up.bounce = 4;
+  systems.session.startDay();
+  systems.progression.dragBase = () => 0;
+  systems.world.windX = () => 0;
+  systems.world.updraft = () => 0;
+  systems.world.lakeAtX = () => null;
+  Object.assign(session.bird, {
+    alt: 0.1, speed: ESCAPE_V + 100, angle: -Math.PI / 2,
+    bouncing: { spin: true, lockT: 1, v0: ESCAPE_V + 100, chain: 0 },
+  });
+  session.state.msg = 'Keep this notice';
+  systems.flight.update(1 / 120);
+  assert.ok(session.bird.vy > ESCAPE_V);
+  assert.ok(session.bird.bouncing.spin);
+  assert.equal(session.state.moonshot, null);
+  assert.equal(session.state.msg, 'Keep this notice');
+  for (let frame = 0; frame < 240 && !session.state.moonshot; frame++) systems.flight.update(1 / 120);
+  assert.ok(session.bird.alt >= session.MAX_ALT);
+  assert.ok(session.state.moonshot.v0 >= ESCAPE_V);
+  assert.equal(session.bird.bouncing, null);
+});
+
+test('predator arrivals and attack outcomes do not replace retained notices', () => {
+  const { session, systems } = fixture();
+  session.state.msg = 'Keep this notice';
+  session.state.msgT = 2;
+  session.state.day = 10;
+  session.state.hazards.hawkT = 0;
+  session.state.hazards.cats = [];
+  session.state.hazards.hunters = [];
+  systems.hazards.updateHazards(0.01);
+  const hawk = session.state.hazards.hawk;
+  assert.equal(hawk.mode, 'stalk');
+  Object.assign(hawk, { x: session.bird.x + 60, alt: session.bird.alt, t: 0 });
+  systems.hazards.updateHazards(0.01);
+  assert.equal(hawk.mode, 'stoop');
+  hawk.t = 0;
+  systems.hazards.updateHazards(0.01);
+  assert.equal(hawk.mode, 'recover');
+  Object.assign(hawk, { t: 0, attacks: 100 });
+  systems.hazards.updateHazards(0.01);
+  assert.equal(hawk.mode, 'leave');
+  assert.equal(session.state.msg, 'Keep this notice');
+  assert.equal(session.state.msgT, 2);
+});
+
+test('seconds to sunset follow real-time slow-motion rate and freeze while paused', () => {
+  const { session, systems } = fixture();
+  const setRemaining = seconds => {
+    session.state.tod = systems.progression.todForHour(DAY_END_HOUR - seconds * 24 / DAY_LENGTH);
+  };
+  session.timeScale = 1;
+  setRemaining(10);
+  assert.ok(Math.abs(systems.session.daySecondsLeft() - 10) < 1e-9);
+  session.timeScale = 0.5;
+  assert.ok(Math.abs(systems.session.daySecondsLeft() - 20) < 1e-9);
+  setRemaining(5);
+  assert.ok(Math.abs(systems.session.daySecondsLeft() - 10) < 1e-9);
+  session.paused = true;
+  systems.flight.update(1);
+  assert.ok(Math.abs(systems.session.daySecondsLeft() - 10) < 1e-9);
+  session.paused = false;
+  systems.flight.update(0.5);
+  assert.ok(Math.abs(systems.session.daySecondsLeft() - 9) < 1e-9);
+  assert.ok(!session.state.msg.includes('30 minutes'));
+  setRemaining(-1);
+  assert.equal(systems.session.daySecondsLeft(), 0);
+  systems.flight.update(0.01);
+  assert.equal(session.state.over, true);
+  assert.equal(session.state.recap.reason, 'sunset');
 });
 
 test('hunter shots hit cats and goshawks that cross the telegraphed line', () => {
@@ -264,6 +380,91 @@ test('grottos are random world features independent of gun progression', () => {
   assert.equal(systems.water.grottoOpen(lake), true);
   session.state.grottoCleared[lake.x0] = true;
   assert.equal(systems.water.grottoOpen(lake), false);
+});
+
+function grottoEncounter() {
+  const game = fixture();
+  const lake = { x0: 1000, w: 100, depth: 24, grotto: true };
+  game.session.bird.inWater = lake;
+  game.systems.water.enterGrotto(lake);
+  game.session.bird.breath = 100;
+  game.session.bird.invulnT = 100;
+  game.session.state.grotto.octo.atkT = 100;
+  return game;
+}
+
+test('octopus starts nearer the entrance and retreats only when approached, pausing while frozen', () => {
+  const { session, systems } = grottoEncounter();
+  const o = session.state.grotto.octo;
+  assert.equal(o.x, OCTO_START_X);
+  assert.ok(o.x < GROTTO_L / 2);
+  systems.water.updateGrotto(0.1);
+  assert.equal(o.x, OCTO_START_X);
+  Object.assign(session.bird, { x: o.x - 20, alt: o.alt, speed: 0.3 });
+  systems.water.updateGrotto(0.1);
+  assert.ok(o.x > OCTO_START_X);
+  const x = o.x;
+  o.frozenT = 1;
+  systems.water.octoHit({ part: o }, 'BANG!');
+  systems.water.updateGrotto(0.1);
+  assert.equal(o.x, x);
+  o.frozenT = 0;
+  systems.water.updateGrotto(0.1);
+  assert.ok(o.x > x);
+});
+
+test('head and tentacle hits recoil the octopus deeper without changing damage or interruption', () => {
+  const { session, systems } = grottoEncounter();
+  const o = session.state.grotto.octo;
+  session.state.msg = 'Keep this notice';
+  session.state.msgT = 2;
+  systems.water.octoHit({ part: o }, 'BANG!');
+  assert.equal(session.state.msg, 'Keep this notice');
+  assert.equal(session.state.msgT, 2);
+  assert.equal(o.hp, OCTO_HP - 1);
+  assert.ok(o.retreatX > o.x);
+  const start = o.x;
+  systems.water.updateGrotto(0.1);
+  assert.ok(o.x > start + 0.5);
+  const tn = o.tents[0], x = o.x;
+  tn.mode = 'wind';
+  tn.ux = -1; tn.uy = 0; tn.wind = 1;
+  systems.water.octoHit({ part: tn }, 'BANG!');
+  assert.equal(tn.mode, 'retract');
+  assert.equal(tn.stun, 2);
+  assert.equal(o.hp, OCTO_HP - 1);
+  systems.water.updateGrotto(0.1);
+  assert.ok(o.x > x + 0.5);
+  o.x = GROTTO_L - 14;
+  o.retreatX = o.x;
+  systems.water.octoHit({ part: o }, 'BOOM!');
+  assert.ok(!session.state.msg.includes('Octopus hit'));
+  assert.equal(o.hp, OCTO_HP - 5);
+  systems.water.updateGrotto(0.1);
+  assert.equal(o.x, GROTTO_L - 14);
+  assert.ok(o.x + 3.2 < GROTTO_L);
+});
+
+test('grotto end wall blocks swimming and gun rays; defeat still awards and permits the left exit', () => {
+  const { session, systems, values } = grottoEncounter();
+  const g = session.state.grotto, o = g.octo;
+  Object.assign(session.bird, { x: GROTTO_L - 0.5, alt: GROTTO_H / 2, speed: 3, angle: 0 });
+  systems.water.updateGrotto(0.1);
+  assert.equal(session.bird.x, GROTTO_L - 1);
+  assert.equal(systems.combat.gunTrace(1, 0).t, 1);
+  session.bird.x = 2;
+  assert.equal(systems.combat.gunTrace(-1, 0).t, 2);
+  o.hp = 1;
+  systems.water.octoHit({ part: o }, 'BANG!');
+  assert.equal(session.state.grottoCleared[g.lake.x0], true);
+  assert.equal(session.state.lastCatch.targetKind, 'octopus');
+  assert.equal(session.progress.ach.kraken, session.state.day);
+  assert.equal(JSON.parse(values.get(PROGRESS_KEY)).ach.kraken, session.state.day);
+  Object.assign(session.bird, { x: 0.4, angle: Math.PI, speed: 0.3 });
+  systems.water.updateGrotto(0.01);
+  assert.equal(session.state.grotto, null);
+  assert.equal(session.bird.inWater, g.lake);
+  assert.equal(session.bird.x, g.lake.x0 + g.lake.w - 4);
 });
 
 test('base turtles drop without aiming and the first aim upgrade adds a push', () => {

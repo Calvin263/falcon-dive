@@ -1,5 +1,5 @@
 import { LENS_R } from '../config.js';
-import { G, BRAKE_DRAG, STALL_SPEED, DIVE_SPEED, SAFE_VSPEED, CRASH_REVEAL_DELAY, BRAKE_UNLOCK, VIEW_MARGIN, AIR_FOCUS_DIST, CAMERA_VIEW, CHASE_ZOOM_MAX, GROUND_FRAME, GROUND_SHOW_ALT, HIGH_CAM, CEILING_MARGIN, CHASE_MIN_FLY, ABOVE_CEILING_DRAG, DAY_END_HOUR, DUSK_WARN_HOUR, STATS, BOUNCE_LIFT, BOUNCE_MIN_UP, BOUNCE_LOCK, BOUNCE_STEER, BOUNCE_DRAG, SPIN_R, SPIN_RATE, SPIN_STEER, SPIN_TURN, MOON_GAIN, MOON_LIFT_MAX, ESCAPE_V, MOONSHOT_T, SAT_ABOVE, SAT_SPEED, SAT_WRAP, SPECIES, WATER_PLUNGE_VY, WATER_DRAG, WATER_BUOY, BREATHLESS_BUOY, WATER_EXIT_SPEED, WET_TIME, MOON_BOUNTY } from '../config.js';
+import { G, BRAKE_DRAG, STALL_SPEED, DIVE_SPEED, SAFE_VSPEED, CRASH_REVEAL_DELAY, BRAKE_UNLOCK, VIEW_MARGIN, AIR_FOCUS_DIST, CAMERA_VIEW, CHASE_ZOOM_MAX, GROUND_FRAME, GROUND_SHOW_ALT, HIGH_CAM, CEILING_MARGIN, CHASE_MIN_FLY, ABOVE_CEILING_DRAG, DAY_END_HOUR, STATS, BOUNCE_LIFT, BOUNCE_MIN_UP, BOUNCE_LOCK, BOUNCE_STEER, BOUNCE_DRAG, SPIN_R, SPIN_RATE, SPIN_STEER, SPIN_TURN, MOON_GAIN, MOON_LIFT_MAX, ESCAPE_V, MOONSHOT_T, SAT_ABOVE, SAT_SPEED, SAT_WRAP, SPECIES, WATER_PLUNGE_VY, WATER_DRAG, WATER_BUOY, BREATHLESS_BUOY, WATER_EXIT_SPEED, WET_TIME, MOON_BOUNTY } from '../config.js';
 import { lerp, clamp, randDir, wrapAngle } from '../core/math.js';
 
 export function createFlight({ session, viewport, systems }) {
@@ -59,7 +59,6 @@ export function createFlight({ session, viewport, systems }) {
   function startMoonshot() {
     session.state.moonshot = { t: 0, v: session.bird.vy, v0: session.bird.vy, landed: false };
     session.bird.bouncing = null; session.bird.vx = 0; session.bird.angle = Math.PI / 2;
-    session.state.msg = 'ESCAPE VELOCITY! Next stop: the moon'; session.state.msgT = 3; session.state.msgTags = null;
     session.cam.shake = 14;
   }
   function updateMoonshot(dt) {
@@ -207,7 +206,6 @@ export function createFlight({ session, viewport, systems }) {
       }
       // Once the launch is over, braking always recovers and a plain bounce hands control back at the top of the arc
       if (free && (braking || (!session.bird.bouncing.spin && bvy < 0))) {
-        if (session.bird.bouncing.spin) { session.state.msg = 'Spin recovered'; session.state.msgT = 1; session.state.msgTags = null; }
         session.bird.bouncing = null;
       }
     } else if (session.bird.alt > session.MAX_ALT) {
@@ -246,6 +244,7 @@ export function createFlight({ session, viewport, systems }) {
     const vy = Math.sin(session.bird.angle) * session.bird.speed - sink;
     systems.world.updateWind(dt);
     const gvx = vx + (session.bird.inWater ? 0 : systems.world.windX(session.bird.alt)), gvy = vy + (session.bird.inWater ? 0 : systems.world.updraft(session.bird.x, session.bird.alt));
+    const previousAlt = session.bird.alt;
     session.bird.x += gvx * dt;
     session.bird.alt += gvy * dt;
 
@@ -263,6 +262,11 @@ export function createFlight({ session, viewport, systems }) {
     }
     session.bird.vx = gvx; session.bird.vy = gvy;
     session.state.maxSpeed = Math.max(session.state.maxSpeed, session.bird.speed);
+
+    if (!session.bird.inWater && previousAlt <= session.MAX_ALT && session.bird.alt >= session.MAX_ALT && gvy >= ESCAPE_V) {
+      startMoonshot();
+      return;
+    }
 
     if (braking && session.bird.speed > 25 && Math.random() < 0.5) {
       session.particles.push({ x: session.bird.x, alt: session.bird.alt, vx: -vx * 0.1, vy: -vy * 0.1, life: 0.6 });
@@ -318,13 +322,7 @@ export function createFlight({ session, viewport, systems }) {
         session.bird.spinA = session.bird.angle;
         session.cam.shake = Math.max(session.cam.shake, 6 + chain * 2);
         session.state.bestLaunch = Math.max(session.state.bestLaunch || 0, bvy);
-        const left = session.state.bounces === Infinity ? '' : session.state.bounces ? ` (${session.state.bounces} left)` : ' (last one!)';
-        session.state.msg = systems.progression.moonSprings() && session.bird.bouncing.spin
-          ? `BOING ×${chain + 1}! ${Math.round(bvy * 3.6)} km/h up`
-          : `BOING!${session.bird.bouncing.spin ? ' Spinning — brake to recover' : ''}${left}`;
-        session.state.msgT = 2; session.state.msgTags = null;
         for (let i = 0; i < 24; i++) session.particles.push({ x: session.bird.x, alt: 0.3, vx: (Math.random() - 0.5) * 16, vy: Math.random() * 8, life: 0.9 });
-        if (systems.progression.moonSprings() && session.bird.bouncing.spin && bvy >= ESCAPE_V) startMoonshot();
       } else if (-session.bird.vy > SAFE_VSPEED) {
         session.state.crash = {
           t: 0,
@@ -361,10 +359,6 @@ export function createFlight({ session, viewport, systems }) {
     session.state.time += dt;
     // Day clock: warn at dusk; at sunset let any falling turtles land, then end the day
     const hour = systems.session.huntHour();
-    if (!session.state.duskWarned && hour >= DUSK_WARN_HOUR) {
-      session.state.duskWarned = true;
-      session.state.msg = 'The sun is setting — 30 minutes of hunting left'; session.state.msgT = 3;
-    }
     if (!session.state.sunset && hour >= DAY_END_HOUR) {
       session.state.sunset = true;
       session.bird.carrying = null;

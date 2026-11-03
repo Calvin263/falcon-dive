@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { ACHIEVEMENTS } from '../../src/config.js';
+import { ACHIEVEMENTS, ESCAPE_V, MOONSHOT_T, GROTTO_L, GROTTO_H, OCTO_START_X, DAY_END_HOUR, DAY_LENGTH } from '../../src/config.js';
 
 test.beforeEach(async ({ page }) => {
   const errors = [];
@@ -335,6 +335,87 @@ test('hidden achievements show placeholder descriptions until earned, without ro
   expect(unlocked.filter(label => label === 'hidden achievement')).toHaveLength(ACHIEVEMENTS.filter(a => a.hidden).length - 1);
 });
 
+test('grotto has varied contours and a visible sealed end, with an earlier retreating octopus', async ({ page }, testInfo) => {
+  const entrance = await page.evaluate(() => {
+    const game = window.__falconDiveDebug;
+    game.resetProgress();
+    game.startDay();
+    const lake = { x0: 1000, w: 100, depth: 24, grotto: true };
+    Object.assign(game.bird, { x: 1097, alt: -22, inWater: lake, speed: 3, angle: 0, breath: 100 });
+    game.step(0.001);
+    const o = game.state.grotto.octo;
+    const start = o.x;
+    o.atkT = 100;
+    Object.assign(game.bird, { x: o.x - 20, alt: o.alt, speed: 0.3, invulnT: 100 });
+    game.step(0.1);
+    game.session.paused = true;
+    game.render();
+    return { start, retreated: o.x > start };
+  });
+  expect(entrance.start).toBe(OCTO_START_X);
+  expect(entrance.retreated).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath('grotto-early-encounter.png') });
+  const wall = await page.evaluate(({ length, height }) => {
+    const game = window.__falconDiveDebug;
+    Object.assign(game.bird, { x: length - 1, alt: height / 2, speed: 0.3 });
+    game.state.grotto.octo.x = length - 14;
+    game.session.paused = false;
+    game.step(0.001);
+    game.session.paused = true;
+    const ctx = document.querySelector('#game').getContext('2d');
+    const originalLine = ctx.lineTo, originalMove = ctx.moveTo;
+    const rim = [], contour = [];
+    function record(x, y) {
+      if (ctx.strokeStyle === '#648084') rim.push({ x, y });
+      if (ctx.fillStyle === '#1d2a2c') contour.push({ x, y });
+    }
+    ctx.lineTo = function (x, y) { record(x, y); return originalLine.call(this, x, y); };
+    ctx.moveTo = function (x, y) { record(x, y); return originalMove.call(this, x, y); };
+    try { game.render(); } finally { ctx.lineTo = originalLine; ctx.moveTo = originalMove; }
+    return { rim, contour };
+  }, { length: GROTTO_L, height: GROTTO_H });
+  expect(wall.rim.length).toBeGreaterThan(16);
+  expect(new Set(wall.rim.map(point => point.x.toFixed(2))).size).toBeGreaterThan(3);
+  expect(wall.rim.some(point => point.x > 0 && point.x < page.viewportSize().width && point.y > 0 && point.y < page.viewportSize().height)).toBe(true);
+  const surface = wall.contour.slice(1, -1);
+  expect(Math.max(...surface.map(point => point.y)) - Math.min(...surface.map(point => point.y))).toBeGreaterThan(10);
+  await page.screenshot({ path: testInfo.outputPath('grotto-sealed-end.png') });
+});
+
+test('ceiling escape renders the moon cinematic and persists its landing', async ({ page }, testInfo) => {
+  const launch = await page.evaluate(escapeSpeed => {
+    const game = window.__falconDiveDebug;
+    game.resetProgress();
+    game.startDay();
+    Object.assign(game.bird, {
+      alt: game.session.MAX_ALT - 1,
+      speed: escapeSpeed + 100,
+      angle: Math.PI / 2,
+      bouncing: null,
+    });
+    game.session.mouse.x = innerWidth / 2;
+    game.session.mouse.y = 0;
+    game.step(1 / 120);
+    game.session.paused = true;
+    game.render();
+    return { launched: !!game.state.moonshot, speed: game.state.moonshot?.v0, altitude: game.bird.alt, ceiling: game.session.MAX_ALT };
+  }, ESCAPE_V);
+  expect(launch.launched).toBe(true);
+  expect(launch.speed).toBeGreaterThanOrEqual(ESCAPE_V);
+  expect(launch.altitude).toBeGreaterThanOrEqual(launch.ceiling);
+  await page.screenshot({ path: testInfo.outputPath('ceiling-moon-launch.png') });
+  const landed = await page.evaluate(duration => {
+    const game = window.__falconDiveDebug;
+    game.session.paused = false;
+    game.step(duration);
+    game.session.paused = true;
+    game.render();
+    return { landed: game.state.moonshot.landed, day: game.state.day, saved: JSON.parse(localStorage.getItem('falconDive.progress')).ach.moon };
+  }, MOONSHOT_T);
+  expect(landed.landed).toBe(true);
+  expect(landed.saved).toBe(landed.day);
+});
+
 test('braking cancels automatic fire and a pending turtle grab', async ({ page }) => {
   const result = await page.evaluate(() => {
     const game = window.__falconDiveDebug;
@@ -440,7 +521,7 @@ test('rifle-stealing buzzards show a weapon and aim warning, then earn a hidden 
       return originalText.call(this, label, ...args);
     };
     try { game.render(); } finally { ctx.fillRect = originalRect; textCtx.fillText = originalText; }
-    return { stolen, rifle, warning: text.includes('BUZZARD AIMING — DODGE!'), achievement: !!game.progress.ach.armedBuzzard };
+    return { stolen, rifle, warning: text.includes('Buzzard aiming!'), achievement: !!game.progress.ach.armedBuzzard };
   });
   expect(result).toEqual({ stolen: { carrying: null, ammo: 2, mode: 'armed' }, rifle: true, warning: true, achievement: false });
   await page.screenshot({ path: testInfo.outputPath('armed-buzzard-aiming.png') });
@@ -604,12 +685,13 @@ test('eyas ammo stays visible and notices wrap above the flight area', async ({ 
   for (const carrying of [false, true]) {
     for (const ammo of [[4, 10, 2], [0, 0, 0]]) {
       const text = await checkHud(ammo, carrying);
-      const readout = text.find(item => item.label.startsWith('Eyas ammo:'));
-      expect(readout.label).toBe(`Eyas ammo: ${ammo.join(' / ')}`);
+      const readouts = text.filter(item => /^Eyas \d:/.test(item.label));
+      expect(readouts.map(item => item.label)).toEqual(ammo.map((n, i) => `Eyas ${i + 1}: ${n}/10`));
+      const readout = readouts[0];
       expect(readout.left).toBeGreaterThanOrEqual(0);
       expect(readout.right).toBeLessThanOrEqual(page.viewportSize().width);
       expect(readout.right - readout.left).toBeLessThanOrEqual(154);
-      const notices = text.filter(item => /goshawk|Break away|New upgrade|Roost:|Right-click|Space:/.test(item.label));
+      const notices = text.filter(item => /goshawk|Break away|New upgrade|Roost:/.test(item.label));
       expect(notices.length).toBeGreaterThanOrEqual(2);
       expect(readout.y).toBeGreaterThan(Math.max(...notices.map(notice => notice.y)) + 17);
       for (const notice of notices) {
@@ -639,46 +721,203 @@ test('recent catch names and all modifiers wrap separately from warnings and exp
     game.state.lastCatch = caught;
     game.state.catchLog = [caught];
     const ctx = document.querySelector('#hud-overlay').getContext('2d');
-    const original = ctx.fillText;
+    const world = document.querySelector('#game').getContext('2d');
+    const original = ctx.fillText, originalRect = world.fillRect, panels = [];
     let text = [];
+    world.fillRect = function (x, y, width, height) {
+      if (this.fillStyle === 'rgba(12, 20, 34, 0.45)') panels.push({ x, y, width, height, color: this.fillStyle });
+      return originalRect.call(this, x, y, width, height);
+    };
     ctx.fillText = function (label, x, y, ...args) {
       const width = this.measureText(label).width;
       const left = this.textAlign === 'center' ? x - width / 2 : this.textAlign === 'right' ? x - width : x;
-      text.push({ label: String(label), y, left, right: left + width, centered: this.textAlign === 'center' });
+      text.push({ label: String(label), x, y, left, right: left + width, notice: this.textAlign === 'center' });
       return original.call(this, label, x, y, ...args);
     };
     try {
       game.render();
       const active = text;
       text = [];
-      game.state.time = 14;
+      game.state.time = 12.5;
       game.render();
       const expired = text;
       text = [];
       game.state.time = 10;
       game.render();
-      return { active, expired, tags };
-    } finally { ctx.fillText = original; }
+      return { active, expired, tags, panels };
+    } finally { ctx.fillText = original; world.fillRect = originalRect; }
   });
   const heading = result.active.find(item => item.label === 'TURTLE STRIKE! Starling ×3 +$240');
   expect(heading).toBeTruthy();
+  expect(heading.x).toBe(page.viewportSize().width / 2);
+  expect(result.panels.length).toBeGreaterThan(0);
+  for (const panel of result.panels) {
+    expect(panel.width).toBeLessThanOrEqual(340);
+    expect(panel.x + panel.width).toBeLessThanOrEqual(page.viewportSize().width - 16);
+    expect(panel.color).toMatch(/0\.45\)$/);
+  }
+  expect(result.panels.some(panel => panel.width < 250)).toBe(true);
   const warning = result.active.find(item => item.label.includes('goshawk is hunting'));
   const unlock = result.active.filter(item => /New upgrade|Roost: Rifle/.test(item.label));
-  expect(heading.y).toBeGreaterThan(Math.max(warning.y, ...unlock.map(item => item.y)) + 17);
-  const modifiers = result.active.filter(item => item.centered && result.tags.some(tag => item.label.includes(tag)));
+  expect(heading.y).toBeGreaterThan(Math.max(warning.y, ...unlock.map(item => item.y)) + 14);
+  const modifiers = result.active.filter(item => item.notice && result.tags.some(tag => item.label.includes(tag)));
   expect(modifiers.map(item => item.label).join(' ')).toContain(result.tags.join(' · '));
   for (const line of [heading, ...modifiers]) {
+    expect(line.x).toBe(page.viewportSize().width / 2);
     expect(line.left).toBeGreaterThanOrEqual(16);
     expect(line.right).toBeLessThanOrEqual(page.viewportSize().width - 16);
     expect(line.y).toBeLessThan(280);
   }
   const lastModifierY = Math.max(...modifiers.map(item => item.y));
   expect(lastModifierY).toBeGreaterThan(heading.y);
-  const ammo = result.active.find(item => item.label.startsWith('Eyas ammo:'));
+  const ammo = result.active.find(item => item.label.startsWith('Eyas 1:'));
   expect(ammo.y).toBeGreaterThan(lastModifierY + 17);
-  expect(result.expired.some(item => item.centered && (item.label.includes('TURTLE STRIKE!') || item.label.includes('Double ricochet')))).toBe(false);
+  expect(result.expired.some(item => item.notice && (item.label.includes('TURTLE STRIKE!') || item.label.includes('Double ricochet')))).toBe(false);
   expect(result.expired.some(item => item.label.includes('goshawk is hunting'))).toBe(true);
   await page.screenshot({ path: testInfo.outputPath('recent-catch-feedback.png') });
+});
+
+test('sunset countdown shows real seconds at the current slow-motion rate and freezes on pause', async ({ page }, testInfo) => {
+  const capture = async (seconds, rate) => page.evaluate(({ seconds, rate, endHour, dayLength }) => {
+    const game = window.__falconDiveDebug;
+    game.startDay();
+    game.session.paused = true;
+    game.session.timeScale = rate;
+    game.state.tod = (endHour - seconds * 24 / dayLength - 1.2) / 24;
+    const ctx = document.querySelector('#hud-overlay').getContext('2d');
+    const original = ctx.fillText, text = [];
+    ctx.fillText = function (label, ...args) { text.push({ label: String(label), font: this.font, alpha: this.globalAlpha, color: this.fillStyle, x: args[0], y: args[1], width: this.measureText(label).width }); return original.call(this, label, ...args); };
+    try { game.render(); } finally { ctx.fillText = original; }
+    return text;
+  }, { seconds, rate, endHour: DAY_END_HOUR, dayLength: DAY_LENGTH });
+  expect((await capture(10.1, 1)).some(item => item.font === 'bold 48px monospace')).toBe(false);
+  for (const [seconds, rate, label] of [[9.9, 1, '10'], [4.9, 0.5, '10'], [2.4, 0.5, '5'], [0.9, 1, '1']]) {
+    const text = await capture(seconds, rate);
+    expect(text.some(item => item.label === 'DAY ENDING')).toBe(false);
+    const countdown = text.find(item => item.label === label && item.font === 'bold 48px monospace');
+    expect(countdown).toBeTruthy();
+    expect(countdown.color).toBe(label === '1' ? '#ff7766' : '#ffd34d');
+    expect(countdown.x).toBe(page.viewportSize().width / 2);
+    expect(countdown.y).toBe(94);
+    expect(countdown.x - countdown.width / 2).toBeGreaterThan(0);
+    expect(countdown.x + countdown.width / 2).toBeLessThan(page.viewportSize().width);
+  }
+  const bright = (await capture(0.9, 1)).find(item => item.font === 'bold 48px monospace');
+  const faded = (await capture(0.1, 1)).find(item => item.font === 'bold 48px monospace');
+  expect(bright.alpha).toBeGreaterThan(0.85);
+  expect(faded.alpha).toBeLessThan(0.25);
+  const frozen = await page.evaluate(() => {
+    const game = window.__falconDiveDebug, before = game.state.tod;
+    game.step(1);
+    return before === game.state.tod;
+  });
+  expect(frozen).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath('sunset-countdown.png') });
+});
+
+test('resource icons gray out used charges and eyas ammo uses bullet pips or a magazine bar', async ({ page }, testInfo) => {
+  for (const unlimited of [false, true]) {
+    const drawing = await page.evaluate(unlimited => {
+      const game = window.__falconDiveDebug;
+      game.resetProgress();
+      Object.assign(game.progress.up, { lucky: 2, bounce: unlimited ? 3 : 1, eyas: 3, eyasgun: unlimited ? 2 : 1 });
+      game.startDay();
+      game.session.paused = true;
+      game.state.feathers = 1;
+      game.state.bounces = unlimited ? Infinity : 1;
+      game.state.eyases.forEach((eyas, i) => { eyas.ammo = i === 0 ? 2 : 0; });
+      const ctx = document.querySelector('#game').getContext('2d'), overlay = document.querySelector('#hud-overlay').getContext('2d');
+      const originalEllipse = ctx.ellipse, originalStroke = ctx.stroke, originalRect = ctx.fillRect, originalText = overlay.fillText;
+      const feathers = [], coils = [], ammo = [], text = [];
+      ctx.ellipse = function (x, y, rx, ry, ...args) {
+        if (x === 132 && rx === 5 && ry === 10) feathers.push({ y, color: this.fillStyle });
+        return originalEllipse.call(this, x, y, rx, ry, ...args);
+      };
+      ctx.stroke = function (...args) {
+        if (this.strokeStyle === '#b8f1c8' || this.strokeStyle === '#687381') coils.push(this.strokeStyle);
+        return originalStroke.apply(this, args);
+      };
+      ctx.fillRect = function (x, y, w, h) {
+        if (x > innerWidth - 184 && (h === 12 || h === 10)) ammo.push({ x, y, w, h });
+        return originalRect.call(this, x, y, w, h);
+      };
+      overlay.fillText = function (label, x, y, ...args) { text.push({ label: String(label), x, y }); return originalText.call(this, label, x, y, ...args); };
+      try { game.render(); } finally { ctx.ellipse = originalEllipse; ctx.stroke = originalStroke; ctx.fillRect = originalRect; overlay.fillText = originalText; }
+      return { feathers, coils, ammo, text };
+    }, unlimited);
+    expect(drawing.feathers.map(feather => feather.color)).toEqual(['#fff1b8', '#687381']);
+    expect(drawing.coils).toEqual(unlimited ? ['#b8f1c8'] : ['#b8f1c8', '#687381', '#687381']);
+    expect(drawing.text.some(item => item.label === '∞')).toBe(unlimited);
+    expect(drawing.text.some(item => /Lucky feather|Springy legs|Eyas ammo:/.test(item.label))).toBe(false);
+    const max = unlimited ? 10 : 4;
+    expect(drawing.text.filter(item => /^Eyas \d:/.test(item.label)).map(item => item.label)).toEqual([`Eyas 1: 2/${max}`, `Eyas 2: 0/${max}`, `Eyas 3: 0/${max}`]);
+    expect(drawing.ammo.filter(rect => rect.h === 12)).toHaveLength(unlimited ? 0 : 12);
+    expect(drawing.ammo.filter(rect => rect.h === 10)).toHaveLength(unlimited ? 6 : 0);
+    for (const feather of drawing.feathers) expect(feather.y).toBeLessThan(page.viewportSize().height - 60);
+  }
+  await page.screenshot({ path: testInfo.outputPath('resource-icons-and-eyas-ammo.png') });
+});
+
+test('carrying status stays in the equipment HUD without a recurring top popup', async ({ page }) => {
+  for (const carrying of [{ kind: 'turtle' }, { kind: 'gun', ammo: 2 }]) {
+    const text = await page.evaluate(carrying => {
+      const game = window.__falconDiveDebug;
+      game.resetProgress();
+      game.startDay();
+      game.session.paused = true;
+      game.bird.carrying = carrying;
+      game.bird.alt = 150;
+      game.state.msgT = 0;
+      game.state.toast = null;
+      const ctx = document.querySelector('#hud-overlay').getContext('2d');
+      const original = ctx.fillText, text = [];
+      ctx.fillText = function (label, x, y, ...args) {
+        text.push({ label: String(label), x, y });
+        return original.call(this, label, x, y, ...args);
+      };
+      try { game.render(); } finally { ctx.fillText = original; }
+      return text;
+    }, carrying);
+    const controls = text.filter(item => /Right-click|Space:|Turtle ready|Turtle impact/.test(item.label));
+    expect(controls.length).toBeGreaterThanOrEqual(2);
+    expect(text.some(item => item.x === 90 && /Right-click|Space:|Turtle/.test(item.label))).toBe(false);
+    for (const control of controls) expect(control.x).toBe(page.viewportSize().width - 176);
+  }
+});
+
+test('urgent threat labels follow predators and stay within screen edges without flashing banners', async ({ page }, testInfo) => {
+  for (const position of ['onscreen', 'left', 'right', 'above', 'below']) {
+    const drawing = await page.evaluate(position => {
+      const game = window.__falconDiveDebug;
+      game.startDay();
+      game.session.paused = true;
+      Object.assign(game.cam, { x: 0, alt: 200, zoom: 1, zoomY: 1 });
+      const x = position === 'left' ? -10000 : position === 'right' ? 10000 : 0;
+      const alt = position === 'above' ? 10000 : position === 'below' ? -10000 : 200;
+      game.state.rivals = [{ x, alt, mode: 'armed', gun: { ammo: 2 }, aim: 0.5, ax: 0, aalt: 200, vx: 1, vy: 0, flapT: 0 }];
+      const ctx = document.querySelector('#hud-overlay').getContext('2d');
+      const original = ctx.fillText, text = [];
+      ctx.fillText = function (label, x, y, ...args) {
+        text.push({ label: String(label), x, y, width: this.measureText(label).width });
+        return original.call(this, label, x, y, ...args);
+      };
+      try { game.render(); } finally { ctx.fillText = original; }
+      return text;
+    }, position);
+    const warning = drawing.find(item => item.label === 'Buzzard aiming!');
+    expect(warning).toBeTruthy();
+    expect(drawing.some(item => item.label === '!')).toBe(true);
+    expect(warning.x).toBeGreaterThanOrEqual(8);
+    expect(warning.x + warning.width).toBeLessThanOrEqual(page.viewportSize().width - 8);
+    expect(warning.y).toBeGreaterThanOrEqual(8);
+    expect(warning.y).toBeLessThanOrEqual(page.viewportSize().height - 8);
+    if (position === 'left') expect(warning.x).toBeLessThan(50);
+    if (position === 'right') expect(warning.x).toBeGreaterThan(page.viewportSize().width - 150);
+    if (position === 'above') expect(warning.y).toBeLessThan(60);
+    if (position === 'below') expect(warning.y).toBeGreaterThan(page.viewportSize().height - 50);
+    expect(drawing.some(item => /BUZZARD AIMING|HUNTER AIMING|GOSHAWK STRIKING/.test(item.label))).toBe(false);
+  }
+  await page.screenshot({ path: testInfo.outputPath('edge-threat-warning.png') });
 });
 
 test('right-side statuses stay below a busy catch log and inside the viewport', async ({ page }, testInfo) => {
@@ -690,6 +929,8 @@ test('right-side statuses stay below a busy catch log and inside the viewport', 
       game.session.paused = true;
       game.bird.carrying = armed ? { kind: 'gun', ammo: 1 } : null;
       game.state.time = 10;
+      game.progress.moon = 1;
+      game.state.bestLaunch = 230;
       game.state.chainN = 3;
       game.state.chainT = 10;
       game.state.catchLog = Array.from({ length: 30 }, () => ({ kind: 'rabbit', pts: 20, speed: 20, t: 0 }));
@@ -712,20 +953,21 @@ test('right-side statuses stay below a busy catch log and inside the viewport', 
       return { text, cards };
     }, armed);
     expect(drawing.cards.length).toBeGreaterThan(0);
+    expect(drawing.text.some(item => item.label.includes('Launch'))).toBe(false);
     expect(drawing.cards.length).toBeLessThan(30);
     const cardBottom = Math.max(...drawing.cards.map(card => card.y + card.h));
-    const statuses = drawing.text.filter(item => /Lucky feather|Springy legs|Launch|E · Eyases|Eyas ammo:|^Ammo:|^\/ 1 SHOTS$/.test(item.label));
+    const statuses = drawing.text.filter(item => /E · Eyases|Eyas \d:|^Ammo:|^\/ 1 SHOTS$/.test(item.label));
     for (const status of statuses) {
       expect(status.x).toBeGreaterThanOrEqual(page.viewportSize().width - 184);
       expect(status.x + status.width).toBeLessThanOrEqual(page.viewportSize().width - 14);
       expect(status.y).toBeGreaterThan(cardBottom + 17);
       expect(status.y).toBeLessThan(page.viewportSize().height - 60);
     }
-    for (const prefix of ['Lucky feather', 'Springy legs', 'E · Eyases', 'Eyas ammo:']) {
+    for (const prefix of ['E · Eyases', 'Eyas 1:', 'Eyas 2:', 'Eyas 3:']) {
       expect(statuses.some(item => item.label.startsWith(prefix))).toBe(true);
     }
     const chain = drawing.text.find(item => item.label.startsWith('CHAIN'));
-    expect(statuses.find(item => item.label.startsWith('Lucky feather')).y).toBeGreaterThan(chain.y + 17);
+    expect(statuses.find(item => item.label.startsWith('E · Eyases')).y).toBeGreaterThan(chain.y + 17);
   }
   await page.screenshot({ path: testInfo.outputPath('right-side-statuses.png') });
 });

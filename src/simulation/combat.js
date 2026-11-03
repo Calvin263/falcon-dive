@@ -48,6 +48,8 @@ export function createCombat({ session, viewport, systems }) {
     const wl = session.bird.inWater;
     if (session.state.grotto) {
       bestT = Math.min(bestT, GROTTO_L);
+      if (ux > 0) bestT = Math.min(bestT, Math.max(0, GROTTO_L - session.bird.x) / ux);
+      if (ux < 0) bestT = Math.min(bestT, Math.max(0, session.bird.x) / -ux);
       if (uy < 0) bestT = Math.min(bestT, Math.max(0, session.bird.alt) / -uy);
       if (uy > 0) bestT = Math.min(bestT, Math.max(0, GROTTO_H - session.bird.alt) / uy);
     } else if (wl) {
@@ -245,7 +247,7 @@ export function createCombat({ session, viewport, systems }) {
         }
         session.bird.carrying = { kind: 'gun', ammo: g.ammo };
         const how = gunAuto() ? 'hold right-click to spray' : gunFreeAim() ? 'hold right-click to aim anywhere, release to fire' : 'hold right-click, release to fire straight ahead';
-        session.state.msg = `${inAir ? 'Caught it mid-air' : 'Got the ' + (gunBazooka() ? 'bazooka' : 'rifle')}! ${how}`; session.state.msgT = 3; session.state.msgTags = null;
+        session.state.msg = `${inAir ? 'Caught it mid-air' : 'Got the ' + (gunBazooka() ? 'bazooka' : 'rifle')}! ${how}`; session.state.msgT = 2; session.state.msgTags = null;
         if (!session.progress.gunFound) {
           session.progress.gunFound = true; systems.progression.saveProgress();
           toast('New upgrade unlocked in the Roost: Rifle', 4);

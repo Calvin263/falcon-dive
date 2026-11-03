@@ -67,7 +67,7 @@ export const ACHIEVEMENTS = [
   { id: 'kraken', name: 'Kraken Slayer', desc: 'Beat the octopus in its grotto', reward: 150, hidden: true },
   { id: 'bigday', name: 'Big Day', desc: 'Earn $500 in one day', reward: 100 },
   { id: 'naturalist', name: 'Naturalist', desc: 'Catch every species at least once', reward: 250 },
-  { id: 'moon', name: 'Fly Me to the Moon', desc: 'Bounce fast enough to reach the moon', reward: 1000, hidden: true },
+  { id: 'moon', name: 'Fly Me to the Moon', desc: 'Reach the flight ceiling fast enough while climbing to escape to the moon', reward: 1000, hidden: true },
   { id: 'satellite', name: 'Space Junk', desc: 'Shoot down the satellite hidden above the ceiling', reward: 300, hidden: true },
 ];
 export const UPGRADE_COSTS = [40, 100, 220, 450];
@@ -113,8 +113,8 @@ export const BOUNCE_STEER = 6, BOUNCE_DRAG = 0.05, SPIN_R = 5, SPIN_RATE = 18;
 // (SPIN_STEER m/s²) stays below gravity so the spin can't climb forever
 export const SPIN_STEER = 7, SPIN_TURN = 2.6;
 // Moon Springs (Springy Legs tier 4): each bounce in an unbroken buzzsaw chain launches at
-// min(MOON_LIFT_MAX, 1 + MOON_GAIN × bounces so far) × your impact speed instead of BOUNCE_LIFT. Leave the ground
-// at ESCAPE_V m/s straight up and you break free for the moon (the end goal), a MOONSHOT_T s flight.
+// min(MOON_LIFT_MAX, 1 + MOON_GAIN × bounces so far) × your impact speed instead of BOUNCE_LIFT.
+// Reach the flight ceiling at ESCAPE_V m/s upward in any flight to break free for a MOONSHOT_T s moon flight.
 export const MOON_GAIN = 0.1, MOON_LIFT_MAX = 1.3, ESCAPE_V = 250, MOONSHOT_T = 7;
 // A satellite hides SAT_ABOVE m over the flight ceiling, out of sight unless a bounce takes you up there.
 // It drifts at SAT_SPEED and wraps to stay within SAT_WRAP m of you; shoot it, rocket it or buzzsaw it down
@@ -242,7 +242,7 @@ export const BREATHLESS_BUOY = 16, SUBMERGED_HIDE = 1, DUCK_BELOW_REACH = 2.2, D
 export const WATER_EXIT_SPEED = STALL_SPEED + 4, WET_TIME = 2.5, FISH_REACH = 1.6, FISH_SPOOK = 25;
 
 // ---------- Octopus Grotto ----------
-// With a starting rifle (Rifle tier 3+), some lakes hide a cave mouth in the lake bed at their far end. Swim in and you
+// Some lakes hide a cave mouth in the lake bed at their far end. Swim in and you
 // enter a flooded tunnel (its own little scene, in local coordinates: x 0..GROTTO_L, floor 0, ceiling GROTTO_H) with an
 // octopus at the end. Bubble vents refill your breath. The octopus lashes tentacles at you: each one telegraphs
 // its strike line, then lashes out; shoot a tentacle to break the attack, shoot (or talon-strike) the head to hurt it.
@@ -250,6 +250,7 @@ export const WATER_EXIT_SPEED = STALL_SPEED + 4, WET_TIME = 2.5, FISH_REACH = 1.
 export const GROTTO_L = 170, GROTTO_H = 16, GROTTO_VENTS = [12, 45, 78, 108, 132], VENT_R = 2.5, VENT_REFILL = 15;
 export const OCTO_HP = 14, OCTO_REACH = 26, OCTO_HIT = 1.4, OCTO_WIND = [0.85, 0.6], OCTO_STRIKE = 0.2, OCTO_RETRACT = 0.7;
 export const OCTO_ATK = [1.9, 1.15], OCTO_AGGRO = 50, OCTO_HEAD_R = 3.2, OCTO_TALON_DMG = 2, OCTO_ROCKET_DMG = 4;
+export const OCTO_START_X = 58, OCTO_RETREAT_SPEED = 1.2, OCTO_HIT_RETREAT = 6;
 
 // ---------- Moonshot (end goal) ----------
 export const MOON_BOUNTY = 500;

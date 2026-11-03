@@ -97,7 +97,7 @@ export function createWorld({ session, viewport, systems }) {
       s.next -= dt;
       if (s.t <= 0 && s.next <= 0) {
         s.t = s.dur = 20 + Math.random() * 15; s.dir = randDir(); s.next = 120 + Math.random() * 120;
-        session.state.msg = 'A storm front is rolling in!'; session.state.msgT = 2.5;
+        session.state.msg = 'A storm front is rolling in!'; session.state.msgT = 2;
       }
       if (s.t > 0) s.t -= dt;
       s.k = s.t > 0 ? Math.sin(Math.PI * (1 - s.t / s.dur)) : 0;
@@ -110,7 +110,7 @@ export function createWorld({ session, viewport, systems }) {
     s.next -= dt;
     if (s.t <= 0 && s.next <= 0) {
       s.t = s.dur = 20 + Math.random() * 15; s.dir = randDir(); s.next = 120 + Math.random() * 120;
-      session.state.msg = 'A storm front is rolling in!'; session.state.msgT = 2.5;
+      session.state.msg = 'A storm front is rolling in!'; session.state.msgT = 2;
     }
     if (s.t > 0) s.t -= dt;
     s.k = s.t > 0 ? Math.sin(Math.PI * (1 - s.t / s.dur)) : 0;

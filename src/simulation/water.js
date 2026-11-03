@@ -1,4 +1,4 @@
-import { DAY_END_HOUR, STATS, SPECIES, DAY_LENGTH, AUTO_FIRE_DT, CAT_CELL, HUNTER_CELL, HUNTER_FROM_DAY, DUCK_BELOW_REACH, DUCK_SPLASH_R, FISH_REACH, FISH_SPOOK, GROTTO_L, GROTTO_H, GROTTO_VENTS, VENT_R, VENT_REFILL, OCTO_HP, OCTO_REACH, OCTO_HIT, OCTO_WIND, OCTO_STRIKE, OCTO_RETRACT, OCTO_ATK, OCTO_AGGRO, OCTO_HEAD_R, OCTO_TALON_DMG, OCTO_ROCKET_DMG } from '../config.js';
+import { DAY_END_HOUR, STATS, SPECIES, DAY_LENGTH, AUTO_FIRE_DT, CAT_CELL, HUNTER_CELL, HUNTER_FROM_DAY, DUCK_BELOW_REACH, DUCK_SPLASH_R, FISH_REACH, FISH_SPOOK, GROTTO_L, GROTTO_H, GROTTO_VENTS, VENT_R, VENT_REFILL, OCTO_HP, OCTO_REACH, OCTO_HIT, OCTO_WIND, OCTO_STRIKE, OCTO_RETRACT, OCTO_ATK, OCTO_AGGRO, OCTO_HEAD_R, OCTO_TALON_DMG, OCTO_ROCKET_DMG, OCTO_START_X, OCTO_RETREAT_SPEED, OCTO_HIT_RETREAT } from '../config.js';
 import { clamp, randDir } from '../core/math.js';
 
 export function createWater({ session, viewport, systems }) {
@@ -79,13 +79,13 @@ export function createWater({ session, viewport, systems }) {
     const tents = [];
     for (let k = 0; k < 8; k++) tents.push({ base: Math.PI * (0.55 + 0.9 * k / 7), ph: k * 1.7, len: 6 + (k % 3), mode: 'idle', t: 0, stun: 0 });
     session.state.grotto = { lake: l, t: 0, inks: [], bubbles: [],
-                     octo: { x: GROTTO_L - 18, alt: GROTTO_H * 0.55, hp: OCTO_HP, hurtT: 0, atkT: 2.5, tents, frozenT: 0, inked: false } };
+                     octo: { x: OCTO_START_X, retreatX: OCTO_START_X, recoilV: 0, alt: GROTTO_H * 0.55, hp: OCTO_HP, hurtT: 0, atkT: 2.5, tents, frozenT: 0, inked: false } };
     session.bird.x = 3; session.bird.alt = GROTTO_H * 0.45; session.bird.angle = 0; session.bird.speed = Math.min(session.bird.speed, systems.progression.swimSpeed());
     session.bird.breath = Math.max(session.bird.breath, 2);
     session.state.rockets = []; session.state.tracers = [];
     session.mouse.steer = null;
     session.cam.ox = NaN; session.cam.gz = NaN; session.cam.floorPx = NaN; session.cam.lock = null; session.cam.focus = 0; session.cam.pin = null;
-    session.state.msg = 'An underwater grotto… something big lives down here'; session.state.msgT = 3; session.state.msgTags = null;
+    session.state.msg = 'An underwater grotto… something big lives down here'; session.state.msgT = 2; session.state.msgTags = null;
   }
 
   function exitGrotto() {
@@ -132,26 +132,30 @@ export function createWater({ session, viewport, systems }) {
     if (hit.part !== o) {
       const tn = hit.part;
       tn.mode = 'retract'; tn.t = OCTO_RETRACT; tn.stun = 2;
+      recoilOctopus(o);
       session.state.msg = `${verb} Tentacle hit — attack broken`; session.state.msgT = 1.5; session.state.msgTags = null;
       return;
     }
-    octoDamage(verb === 'BOOM!' ? OCTO_ROCKET_DMG : 1, verb, method);
+    octoDamage(verb === 'BOOM!' ? OCTO_ROCKET_DMG : 1, method);
   }
 
-  function octoDamage(dmg, verb, method = 'talons') {
+  function recoilOctopus(o) {
+    o.retreatX = Math.min(GROTTO_L - 14, Math.max(o.retreatX, o.x) + OCTO_HIT_RETREAT);
+    o.recoilV = Math.min(24, o.recoilV + 12);
+  }
+
+  function octoDamage(dmg, method = 'talons') {
     const g = session.state.grotto, o = g.octo;
     if (o.hp <= 0) return;
     o.hp -= dmg; o.hurtT = 0.35;
+    recoilOctopus(o);
     for (let i = 0; i < 10; i++) session.particles.push({ x: o.x, alt: o.alt, vx: (Math.random() - 0.5) * 10, vy: (Math.random() - 0.5) * 10, life: 0.7 });
     // Hurt badly: a cloud of ink to hide behind
     if (!o.inked && o.hp <= OCTO_HP / 2) {
       o.inked = true;
       for (let k = 0; k < 4; k++) g.inks.push({ x: o.x - 6 - k * 4, alt: o.alt + (Math.random() - 0.5) * 6, r: 2, t: 0, life: 5 + Math.random() * 2 });
     }
-    if (o.hp > 0) {
-      session.state.msg = `${verb} Octopus hit! (${Math.max(0, o.hp)}/${OCTO_HP})`; session.state.msgT = 1.5; session.state.msgTags = null;
-      return;
-    }
+    if (o.hp > 0) return;
     session.state.grottoCleared[g.lake.x0] = true;
     for (const tn of o.tents) tn.mode = 'idle';
     systems.prey.award({ kind: 'turtle', speed: session.bird.speed, targetKind: 'octopus', stolen: true, shot: method === 'gun', method, water: true },
@@ -199,14 +203,18 @@ export function createWater({ session, viewport, systems }) {
 
     // Octopus
     o.hurtT -= dt; o.frozenT -= dt;
-    const d = Math.hypot(session.bird.x - o.x, session.bird.alt - o.alt);
+    let d = Math.hypot(session.bird.x - o.x, session.bird.alt - o.alt);
     if (o.hp > 0) {
       const enraged = o.hp <= OCTO_HP / 2 ? 1 : 0;
-      // It creeps out of its lair toward you (and back when you leave), keeping roughly level with you
+      // Retreat deeper as the player approaches; hits add a short recoil without teleporting the attack lines.
       if (o.frozenT <= 0) {
-        const wantX = d < OCTO_AGGRO ? clamp(session.bird.x + 16, GROTTO_L - 48, GROTTO_L - 14) : GROTTO_L - 18;
-        o.x += clamp(wantX - o.x, -1, 1) * (2.5 + 2 * enraged) * dt;
+        if (d < OCTO_AGGRO && session.bird.x < o.x) o.retreatX = Math.min(GROTTO_L - 14, o.retreatX + OCTO_RETREAT_SPEED * dt);
+        const wantX = clamp(Math.max(o.retreatX, d < OCTO_AGGRO ? session.bird.x + 16 : o.x), o.x, GROTTO_L - 14);
+        const recoil = o.recoilV * (1 - Math.exp(-4 * dt)) / 4;
+        o.x = Math.min(GROTTO_L - 14, o.x + Math.min(wantX - o.x, (2.5 + 2 * enraged) * dt) + recoil);
+        o.recoilV *= Math.exp(-4 * dt);
         o.alt += clamp(clamp(session.bird.alt + 1.5, 4.5, GROTTO_H - 4) - o.alt, -1, 1) * 2 * dt;
+        d = Math.hypot(session.bird.x - o.x, session.bird.alt - o.alt);
       }
       if (o.frozenT <= 0 && d < OCTO_AGGRO && (o.atkT -= dt) <= 0) {
         const ready = o.tents.map((tn, k) => [tn, k]).filter(([tn]) => tn.mode === 'idle' && tn.stun <= 0);
@@ -237,7 +245,7 @@ export function createWater({ session, viewport, systems }) {
       if (session.state.over) return;
       // Talon strike on the head (only while it isn't flinching), then you bounce off
       if (d < OCTO_HEAD_R + 0.8 && session.bird.speed > 4 && o.hurtT <= 0) {
-        octoDamage(OCTO_TALON_DMG, 'Talon strike!');
+        octoDamage(OCTO_TALON_DMG);
         session.bird.angle = Math.atan2(session.bird.alt - o.alt, session.bird.x - o.x); session.bird.speed = 6;
       } else if (d < OCTO_HEAD_R) {
         session.bird.x = o.x + (session.bird.x - o.x) / (d || 1) * OCTO_HEAD_R; session.bird.alt = clamp(o.alt + (session.bird.alt - o.alt) / (d || 1) * OCTO_HEAD_R, 0.7, GROTTO_H - 0.7);

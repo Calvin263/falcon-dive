@@ -1,4 +1,4 @@
-import { SHELL_CRACK_SPEED, CHAIN_TIME, CHAIN_STEP, CHAIN_MAX, BUZZARD_BOUNTY, HAZARD_BOUNTY, CROSSFIRE_BONUS, ACHIEVEMENTS, STATS, BOUNCES, CEILINGS, SPECIES, LUCKY } from '../config.js';
+import { SHELL_CRACK_SPEED, CHAIN_TIME, CHAIN_STEP, CHAIN_MAX, BUZZARD_BOUNTY, HAZARD_BOUNTY, CROSSFIRE_BONUS, ACHIEVEMENTS, STATS, BOUNCES, CEILINGS, SPECIES, LUCKY, DAY_END_HOUR, DAY_LENGTH } from '../config.js';
 import { clamp } from '../core/math.js';
 
 export function createSession({ session, viewport, systems }) {
@@ -23,7 +23,7 @@ export function createSession({ session, viewport, systems }) {
               tod: systems.progression.todForHour(STATS.startHour[systems.progression.tier('early')]), storm: { t: 0, dur: 1, next: 90 + Math.random() * 90, dir: 1, k: 0, flash: 0 },
               devils: [], devilT: 15, rivals: [], rivalSeen: {}, hazards: systems.hazards.newHazards(), lastCatch: null,
               day: session.progress.day, dayCounts: {}, chainN: 0, chainT: -Infinity, bestChain: 1, steals: [],
-              duskWarned: false, sunset: false, overT: 0, recap: null, eyases: [], featherFx: [], feathers: 0, bounces: 0, eyasHunt: true, achToday: [], toastQ: [], moonshot: null, bestLaunch: 0, satellite: null,
+              sunset: false, overT: 0, recap: null, eyases: [], featherFx: [], feathers: 0, bounces: 0, eyasHunt: true, achToday: [], toastQ: [], moonshot: null, bestLaunch: 0, satellite: null,
               grotto: null, grottoCleared: {}, inks: [] };
     systems.prey.spawnPreyAhead();
   }
@@ -37,6 +37,7 @@ export function createSession({ session, viewport, systems }) {
   session.confirmReset = false;
   session.achView = false;
   const huntHour = () => session.state.tod * 24 + 1.2;
+  const daySecondsLeft = () => Math.max(0, (DAY_END_HOUR - huntHour()) * DAY_LENGTH / 24) / session.timeScale;
 
   function endDay(reason) {
     if (session.state.over) return;
@@ -144,5 +145,5 @@ export function createSession({ session, viewport, systems }) {
   }
   const chainMult = () => session.state.time - session.state.chainT <= CHAIN_TIME ? Math.min(CHAIN_MAX, 1 + CHAIN_STEP * session.state.chainN) : 1;
   function breakChain() { session.state.chainN = 0; session.state.chainT = -Infinity; }
-  return { breakChain, chainMult, clickUI, endDay, huntHour, priceCatch, reset, resetProgress, showRecap, showShop, startDay, uiHit };
+  return { breakChain, chainMult, clickUI, daySecondsLeft, endDay, huntHour, priceCatch, reset, resetProgress, showRecap, showShop, startDay, uiHit };
 }

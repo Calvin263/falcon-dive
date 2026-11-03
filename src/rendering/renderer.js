@@ -1186,21 +1186,36 @@ export function createRenderer({ session, viewport, systems }) {
       }
     }
     let warn = null;
-    if (systems.progression.tier('catsense') && !session.bird.inWater && session.bird.alt < CAT_ALT * 1.4 &&
-        session.state.hazards.cats.some(c => !c.gone && c.mode !== 'sit' && Math.abs(c.x - session.bird.x) < CAT_REACH * 1.4)) warn = 'CAT IN THE GRASS — pull up!';
-    if (h && h.mode === 'stoop') warn = h.commit ? 'GOSHAWK STRIKING — DIVE OR CLIMB NOW!' : 'GOSHAWK STOOPING — break away when it commits (!)';
+    const nearest = threats => threats.reduce((best, threat) => !best || Math.abs(threat.x - session.bird.x) < Math.abs(best.x - session.bird.x) ? threat : best, null);
+    const cat = nearest(session.state.hazards.cats.filter(c => !c.gone && c.mode !== 'sit' && Math.abs(c.x - session.bird.x) < CAT_REACH * 1.4));
+    if (systems.progression.tier('catsense') && !session.bird.inWater && session.bird.alt < CAT_ALT * 1.4 && cat) warn = { threat: cat, text: 'Cat nearby' };
+    if (h && h.mode === 'stoop') warn = { threat: h, text: h.commit ? 'Goshawk striking!' : 'Goshawk stooping' };
     const hs = session.state.hazards.hunters;
-    const lock = Math.max(0, ...hs.filter(x => x.tracking && x.reload <= 0).map(x => x.lock));
-    if (lock > 0.35) warn = 'HUNTER TRACKING YOU — fly faster or get out of range!';
-    if (hs.some(x => x.aim > 0)) warn = 'HUNTER AIMING — change course NOW!';
-    if (session.state.rivals.some(r => !r.gone && r.gun && r.aim > 0)) warn = 'BUZZARD AIMING — DODGE!';
+    const tracking = nearest(hs.filter(x => !x.gone && x.tracking && x.reload <= 0 && x.lock > 0.35));
+    const aiming = nearest(hs.filter(x => !x.gone && x.aim > 0));
+    const buzzard = nearest(session.state.rivals.filter(r => !r.gone && r.gun && r.aim > 0));
+    if (tracking) warn = { threat: tracking, text: 'Hunter tracking' };
+    if (aiming) warn = { threat: aiming, text: 'Hunter aiming!' };
+    if (buzzard) warn = { threat: buzzard, text: 'Buzzard aiming!' };
     if (!warn) return;
-    viewport.ctx.font = 'bold 16px sans-serif'; viewport.ctx.textAlign = 'center';
-    const tw = viewport.ctx.measureText(warn).width + 28;
-    viewport.ctx.fillStyle = `rgba(150,10,10,${0.55 + 0.25 * Math.sin(session.state.time * 12)})`;
-    viewport.ctx.fillRect(viewport.W / 2 - tw / 2, viewport.H - 120, tw, 30);
+    viewport.ctx.font = 'bold 11px sans-serif'; viewport.ctx.textAlign = 'left';
+    const tw = viewport.ctx.measureText(warn.text).width + 30;
+    const tx = clamp(systems.flight.toScreenX(warn.threat.x), 12, viewport.W - 12);
+    const ty = clamp(systems.flight.toScreenY(warn.threat.alt ?? 1.6), 12, viewport.H - 12);
+    const x = clamp(tx - tw / 2, 8, viewport.W - tw - 8);
+    const y = ty < 48 ? ty + 20 : ty - 36;
+    viewport.ctx.strokeStyle = '#ff7766'; viewport.ctx.lineWidth = 1;
+    viewport.ctx.beginPath(); viewport.ctx.moveTo(tx, ty);
+    viewport.ctx.lineTo(clamp(tx, x + 8, x + tw - 8), ty < 48 ? y : y + 22); viewport.ctx.stroke();
+    viewport.ctx.fillStyle = 'rgba(90,10,10,0.65)';
+    viewport.ctx.fillRect(x, y, tw, 22);
+    viewport.ctx.fillStyle = '#ff7766';
+    viewport.ctx.beginPath(); viewport.ctx.arc(x + 11, y + 11, 7, 0, Math.PI * 2); viewport.ctx.fill();
+    viewport.ctx.fillStyle = '#270707'; viewport.ctx.textAlign = 'center';
+    viewport.ctx.fillText('!', x + 11, y + 15);
+    viewport.ctx.textAlign = 'left';
     viewport.ctx.fillStyle = '#fff';
-    viewport.ctx.fillText(warn, viewport.W / 2, viewport.H - 99);
+    viewport.ctx.fillText(warn.text, x + 24, y + 15);
   }
 
   // Storm darkening, rain and lightning; plus night and golden-hour tints over the world
@@ -1260,10 +1275,31 @@ export function createRenderer({ session, viewport, systems }) {
     for (const [base, dir, col] of [[0, -1, '#1d2a2c'], [GROTTO_H, 1, '#162123']]) {
       viewport.ctx.fillStyle = col; viewport.ctx.beginPath();
       viewport.ctx.moveTo(sx(x0), dir < 0 ? viewport.H + 20 : -20);
-      for (let x = Math.floor(x0); x <= x1; x += 1.5) viewport.ctx.lineTo(sx(x), sy(base - dir * (0.25 + 0.5 * systems.world.wh(Math.floor(x / 1.5) * 1.7 + base))));
+      for (let x = Math.floor(x0); x <= x1; x += 1.5) {
+        const ripple = 0.25 + 0.35 * systems.world.wh(Math.floor(x / 1.5) * 1.7 + base + g.lake.x0);
+        const alcove = 1.4 * (1 + Math.sin(x * 0.09 + base + g.lake.x0)) / 2;
+        viewport.ctx.lineTo(sx(x), sy(base - dir * (ripple - alcove)));
+      }
       viewport.ctx.lineTo(sx(x1), dir < 0 ? viewport.H + 20 : -20); viewport.ctx.closePath(); viewport.ctx.fill();
     }
-    viewport.ctx.fillStyle = '#121b1d'; viewport.ctx.fillRect(sx(GROTTO_L), -20, viewport.W, viewport.H + 40);
+    const wall = [];
+    for (let alt = -3; alt <= GROTTO_H + 3; alt += 1) {
+      wall.push([sx(GROTTO_L + 0.8 * systems.world.wh(alt * 3.1 + g.lake.x0)), sy(alt)]);
+    }
+    viewport.ctx.fillStyle = '#263b3d'; viewport.ctx.beginPath();
+    viewport.ctx.moveTo(viewport.W + 20, wall[0][1]);
+    for (const [x, y] of wall) viewport.ctx.lineTo(x, y);
+    viewport.ctx.lineTo(viewport.W + 20, wall[wall.length - 1][1]); viewport.ctx.closePath(); viewport.ctx.fill();
+    viewport.ctx.strokeStyle = '#648084'; viewport.ctx.lineWidth = Math.max(2, z * 0.3);
+    viewport.ctx.beginPath();
+    wall.forEach(([x, y], i) => { if (i) viewport.ctx.lineTo(x, y); else viewport.ctx.moveTo(x, y); });
+    viewport.ctx.stroke();
+    viewport.ctx.strokeStyle = '#111e21'; viewport.ctx.lineWidth = Math.max(1, z * 0.15);
+    for (let alt = 1; alt < GROTTO_H; alt += 3) {
+      viewport.ctx.beginPath(); viewport.ctx.moveTo(sx(GROTTO_L + 0.8), sy(alt));
+      viewport.ctx.lineTo(sx(GROTTO_L + 2.5), sy(alt + 0.5));
+      viewport.ctx.lineTo(sx(GROTTO_L + 4), sy(alt - 0.3)); viewport.ctx.stroke();
+    }
     // Bubble vents: a dark crack in the floor with a column of air bubbles (refills breath)
     for (const vx of GROTTO_VENTS) {
       viewport.ctx.fillStyle = '#05090a';
@@ -1394,10 +1430,10 @@ export function createRenderer({ session, viewport, systems }) {
         systems.hud.drawClosingHint();
         drawBirdLens();
         drawSunIndicator();
-        drawHazardWarnings();
       }
       if (session.screen === 'hunt') {
         systems.hud.drawHUD();
+        if (!session.state.grotto && !session.state.moonshot) drawHazardWarnings();
         if (session.paused) systems.hud.drawPausePanel();
         if (!session.state.over) systems.hud.drawPauseButton();
       } else if (session.screen === 'recap') {
