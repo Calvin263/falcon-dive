@@ -15,6 +15,11 @@ export function createSession({ session, viewport, systems }) {
     session.prey = [];
     session.particles = [];
     session.cam = { x: 0, alt: 220, zoom: 2.5, zoomY: 2.5, gz: NaN, ox: NaN, oa: NaN, focus: 0, ft: null, shake: 0, lock: null, pin: null };
+    session.cam.diveFollow = false;
+    session.cam.waterFrame = 0;
+    session.cam.wasInWater = false;
+    session.cam.waterExit = null;
+    session.cam.surfaceZoom = null;
     session.state = { score: 0, catches: 0, over: false, msg: '', msgT: 0, msgTags: '', maxSpeed: 0, spawn: systems.prey.newSpawnWindow(0),
               hearingRadius: 8, crash: null,
               catchLog: [], time: 0, wake: [], wakeT: 0, fallers: [], rings: [], guns: [], tracers: [], rockets: [], blasts: [], fish: [],

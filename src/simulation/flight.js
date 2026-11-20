@@ -280,6 +280,7 @@ export function createFlight({ session, viewport, systems }) {
         systems.water.splashAt(session.bird.x, lake);
         session.cam.shake = 0;
         session.cam.surfaceAlt = session.cam.alt;
+        session.cam.surfaceZoom = session.cam.zoom;
         session.cam.pin = null;
         if (!session.progress.swum) {
           session.progress.swum = true; systems.progression.saveProgress();
@@ -515,17 +516,38 @@ export function createFlight({ session, viewport, systems }) {
     const liftWant = session.bird.bouncing ? Math.max(0, session.bird.alt + 40 - session.MAX_ALT) : 0;
     session.cam.ceilLift = Number.isFinite(session.cam.ceilLift) ? session.cam.ceilLift + (liftWant - session.cam.ceilLift) * Math.min(1, dt * (liftWant > session.cam.ceilLift ? 20 : 2)) : 0;
     ca = Math.min(ca, session.MAX_ALT + CEILING_MARGIN + session.cam.ceilLift - viewport.H / 2 / zoomY);
+    if (session.bird.inWater) {
+      session.cam.wasInWater = true;
+      session.cam.waterExit = null;
+    } else if (session.cam.wasInWater) {
+      session.cam.wasInWater = false;
+      session.cam.waterExit = { x: session.cam.x, alt: session.cam.alt, zoom: session.cam.zoom, t: 0 };
+      session.cam.waterFrame = 0;
+    }
     if (!session.bird.inWater || session.bird.alt > -0.75) session.cam.diveFollow = false;
     else if (session.bird.alt <= -3 && session.bird.vy < 0) session.cam.diveFollow = true;
-    const waterFrame = lerp(session.cam.waterFrame ?? 0, session.cam.diveFollow ? 1 : 0, Math.min(1, dt * 5));
+    const waterFrame = lerp(session.cam.waterFrame ?? 0, session.cam.diveFollow ? 1 : 0, Math.min(1, dt * 2.5));
     session.cam.waterFrame = waterFrame < 0.001 ? 0 : waterFrame;
-    if (session.bird.inWater || session.cam.waterFrame) {
+    if (session.bird.inWater || (session.cam.waterFrame && !session.cam.waterExit)) {
       const surfaceAlt = session.bird.inWater ? (session.cam.surfaceAlt ?? ca) : ca;
-      const swimZoom = Math.max(zoom, Math.min(viewport.H / 38, viewport.W / 44));
+      const surfaceZoom = session.bird.inWater ? (session.cam.surfaceZoom ?? zoom) : zoom;
+      const swimZoom = Math.max(surfaceZoom, Math.min(viewport.H / 38, viewport.W / 44));
       ca = lerp(surfaceAlt, Math.min(0, session.bird.alt + session.bird.vy * 0.18), waterFrame);
       cx = lerp(cx, session.bird.x + session.bird.vx * 0.25, waterFrame);
-      zoom = zoomY = lerp(zoom, swimZoom, waterFrame);
-      if (session.bird.inWater && waterFrame > 0) ca = Math.min(ca, session.bird.alt + viewport.H * 0.4 / zoomY);
+      zoom = zoomY = lerp(surfaceZoom, swimZoom, waterFrame);
+      if (session.bird.inWater && waterFrame > 0) {
+        const swimFloor = session.bird.alt + viewport.H * 0.4 / zoomY;
+        ca = Math.min(ca, lerp(surfaceAlt, swimFloor, waterFrame));
+      }
+    }
+    if (session.cam.waterExit) {
+      const exit = session.cam.waterExit;
+      exit.t = Math.min(1, exit.t + dt / 0.5);
+      const k = exit.t * exit.t * (3 - 2 * exit.t);
+      ca = lerp(exit.alt, ca, k);
+      cx = lerp(exit.x, cx, k);
+      zoom = zoomY = lerp(exit.zoom, zoom, k);
+      if (exit.t === 1) session.cam.waterExit = null;
     }
     session.cam.zoom = zoom; session.cam.zoomY = zoomY; session.cam.alt = ca; session.cam.x = cx;  session.cam.shake = Math.max(0, (session.bird.speed - 50) / 45) * 4 + (braking ? 3 : 0);
   }

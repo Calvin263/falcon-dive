@@ -936,6 +936,31 @@ test('graphics quality preset persists and restores the canvas scale', () => {
   assert.equal(restored.session.settings.graphicsPreset, 'high');
 });
 
+test('underwater camera zoom follows a gradual entry transition', () => {
+  const { session, systems, viewport } = fixture();
+  const lake = systems.world.lakeAt(2);
+  const x = lake.x0 + 1;
+  Object.assign(session.bird, { x, alt: -4, speed: 5, angle: -Math.PI / 2, inWater: lake, breath: 30 });
+  Object.assign(session.cam, {
+    x, alt: 120, surfaceAlt: 120, surfaceZoom: 2, zoom: 2, zoomY: 2, gz: 2,
+    ox: 0, oa: 124, waterFrame: 0, diveFollow: false,
+  });
+  session.mouse.x = 640;
+  session.mouse.y = 360;
+
+  systems.flight.update(1 / 60);
+
+  assert.equal(session.cam.waterFrame, 1 / 24);
+  assert.ok(session.cam.alt > 100);
+  const swimZoom = Math.min(viewport.H / 38, viewport.W / 44);
+  assert.ok(Math.abs(session.cam.zoom - (2 + (swimZoom - 2) * session.cam.waterFrame)) < 0.001);
+
+  systems.flight.update(1 / 60);
+
+  assert.ok(session.cam.waterFrame < 0.1);
+  assert.ok(Math.abs(session.cam.zoom - (2 + (swimZoom - 2) * session.cam.waterFrame)) < 0.001);
+});
+
 test('water framing holds at the surface and stays engaged through a shallow ascent', () => {
   const { session, systems } = fixture();
   session.worldSeed = 256;
@@ -957,4 +982,13 @@ test('water framing holds at the surface and stays engaged through a shallow asc
   swimFrame(-0.4, Math.PI / 2);
   assert.equal(session.cam.diveFollow, false);
   assert.ok(session.cam.waterFrame > 0);
+
+  const beforeExit = { x: session.cam.x, alt: session.cam.alt, zoom: session.cam.zoom };
+  swimFrame(0.05, 0);
+  assert.equal(session.bird.inWater, null);
+  assert.ok(Math.abs(session.cam.x - beforeExit.x) < 1);
+  assert.ok(Math.abs(session.cam.alt - beforeExit.alt) < 1);
+  assert.ok(Math.abs(session.cam.zoom - beforeExit.zoom) < 1);
+  for (let frame = 0; frame < 30; frame++) systems.flight.update(1 / 60);
+  assert.equal(session.cam.waterExit, null);
 });
