@@ -44,8 +44,8 @@ export const CHAIN_TIME = 20, CHAIN_STEP = 0.2, CHAIN_MAX = 2;
 export const STARLING_EXTRA = 4;     // $ per extra starling grabbed in a combo
 export const BUZZARD_BOUNTY = 80;
 // Turtle-only targets: the predators that hunt you
-export const HAZARD_BOUNTY = { cat: 200, hunter: 120, hawk: 150, octopus: 450, bullet: 60, satellite: 400 };
-export const HAZARD_NAME = { cat: 'Cat', hunter: 'Hunter', hawk: 'Goshawk', octopus: 'Octopus', bullet: 'Bullet', moon: 'The Moon', satellite: 'Satellite' };
+export const HAZARD_BOUNTY = { cat: 200, hunter: 120, hawk: 150, octopus: 450, bullet: 60, satellite: 400, fishnado: 500, pirates: 350 };
+export const HAZARD_NAME = { cat: 'Cat', hunter: 'Hunter', hawk: 'Goshawk', octopus: 'Octopus', bullet: 'Bullet', moon: 'The Moon', satellite: 'Satellite', fishnado: 'Fishnado', pirates: 'Balloon Pirates' };
 // Crossfire: a predator taken out by another predator (hunter shoots the goshawk or a cat, a cat pounces on the goshawk)
 export const CROSSFIRE_BONUS = 1;   // +100%
 // Achievements: one-off goals, paid once into that day's earnings
@@ -69,7 +69,15 @@ export const ACHIEVEMENTS = [
   { id: 'naturalist', name: 'Naturalist', desc: 'Catch every species at least once', reward: 250 },
   { id: 'moon', name: 'Fly Me to the Moon', desc: 'Reach the flight ceiling fast enough while climbing to escape to the moon', reward: 1000, hidden: true },
   { id: 'satellite', name: 'Space Junk', desc: 'Shoot down the satellite hidden above the ceiling', reward: 300, hidden: true },
+  { id: 'fishnado', name: 'Forecast: Fish', desc: 'Defeat a Fishnado', reward: 150, hidden: true },
+  { id: 'pirates', name: 'Privateer-grine', desc: 'Defeat the balloon pirates', reward: 100, hidden: true },
+  { id: 'lightning', name: 'Shell Conductivity', desc: 'Hit an enemy with a charged turtle', reward: 75, hidden: true },
 ];
+export const SKY = {
+  chargeFuse: 6, chargeWarning: 2, strikeWindup: 1.5, strikeRadius: 30,
+  strikeInterval: 12, dischargeRadius: 24, retention: 1600,
+  fishnadoHp: 12, pirateHp: 8, balloonHp: 2, fishSpeed: 38, earlyStormChance: 0.35, pirateChance: 0.4,
+};
 export const UPGRADE_COSTS = [40, 100, 220, 450];
 // Per-tier stat tables (index = tier)
 export const STATS = {

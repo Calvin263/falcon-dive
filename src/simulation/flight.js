@@ -57,6 +57,8 @@ export function createFlight({ session, viewport, systems }) {
     if (Math.abs(s.x - session.bird.x) > SAT_WRAP) s.x = session.bird.x - Math.sign(s.x - session.bird.x) * SAT_WRAP;
   }
   function startMoonshot() {
+    if (session.bird.carrying?.chargeUntil != null) session.bird.carrying = null;
+    systems.sky.retireAll();
     session.state.moonshot = { t: 0, v: session.bird.vy, v0: session.bird.vy, landed: false };
     session.bird.bouncing = null; session.bird.vx = 0; session.bird.angle = Math.PI / 2;
     session.cam.shake = 14;
@@ -243,7 +245,7 @@ export function createFlight({ session, viewport, systems }) {
     const vx = Math.cos(session.bird.angle) * session.bird.speed;
     const vy = Math.sin(session.bird.angle) * session.bird.speed - sink;
     systems.world.updateWind(dt);
-    const gvx = vx + (session.bird.inWater ? 0 : systems.world.windX(session.bird.alt)), gvy = vy + (session.bird.inWater ? 0 : systems.world.updraft(session.bird.x, session.bird.alt));
+    const gvx = vx + (session.bird.inWater ? 0 : systems.world.windX(session.bird.alt)), gvy = vy + (session.bird.inWater ? 0 : systems.world.updraft(session.bird.x, session.bird.alt) + systems.sky.lift(session.bird.x, session.bird.alt));
     const previousAlt = session.bird.alt;
     session.bird.x += gvx * dt;
     session.bird.alt += gvy * dt;
@@ -277,6 +279,10 @@ export function createFlight({ session, viewport, systems }) {
     if (lake) {
       if (!session.bird.inWater) {
         session.bird.inWater = lake; session.bird.entrySpeed = session.bird.speed; session.bird.breath = systems.progression.swimBreath(); session.bird.bouncing = null;
+        if (session.bird.carrying?.chargeUntil != null) {
+          systems.sky.ground(session.bird.carrying, session.bird.x);
+          session.state.msg = 'The water grounded your charged turtle!'; session.state.msgT = 2;
+        }
         systems.water.splashAt(session.bird.x, lake);
         session.cam.shake = 0;
         session.cam.surfaceAlt = session.cam.alt;
@@ -363,6 +369,7 @@ export function createFlight({ session, viewport, systems }) {
     const hour = systems.session.huntHour();
     if (!session.state.sunset && hour >= DAY_END_HOUR) {
       session.state.sunset = true;
+      systems.sky.retireAll();
       session.bird.carrying = null;
       session.state.msg = 'Sunset — the hunt is over'; session.state.msgT = 3;
     }
@@ -371,6 +378,8 @@ export function createFlight({ session, viewport, systems }) {
       session.state.msg = 'Sunset — the hunt is over';
       return;
     }
+    systems.sky.update(dt);
+    if (session.state.over) return;
     session.state.fog += ((systems.world.insideCloud(session.bird.x, session.bird.alt) ? 1 : 0) - session.state.fog) * Math.min(1, dt * 3);
     // Lowest altitude in the current low pass; resets once you climb away
     session.bird.passMin = session.bird.alt > 30 ? Infinity : Math.min(session.bird.passMin, session.bird.alt);
@@ -488,6 +497,16 @@ export function createFlight({ session, viewport, systems }) {
       zoom = lerp(zoom, Math.max(zoom, az), f); zoomY = zoom;
       camX = lerp(camX, session.bird.x + session.cam.ft.ox, f);
       camAlt = lerp(camAlt, session.bird.alt + session.cam.ft.oalt, f);
+    }
+    if (!lock && !session.bird.inWater && session.bird.alt > 190) {
+      const boss = [session.state.sky.fishnado, session.state.sky.pirates]
+        .filter(o => o && !o.gone && distTo(o) < 150)
+        .sort((a, b) => distTo(a) - distTo(b))[0];
+      if (boss) {
+        const k = 0.18 * (1 - distTo(boss) / 150);
+        camX += (boss.x - session.bird.x) * k;
+        camAlt += (boss.alt - session.bird.alt) * k;
+      }
     }
     // Framing is smoothed as an offset from the bird, so the bird's own motion never lags on screen
     if (!Number.isFinite(session.cam.ox)) { session.cam.ox = camX - session.bird.x; session.cam.oa = camAlt - session.bird.alt; }

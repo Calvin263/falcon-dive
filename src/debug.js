@@ -15,6 +15,7 @@ export function createDebug({ session, viewport, systems }) {
     },
     sensesFor(p) { return systems.prey.sensesInfo(p); },
     sensed(p, dt = 1 / 60) { return systems.prey.sensed(p, dt); },
+    get sky() { return systems.sky; },
     step(dt = 1 / 60) { systems.flight.update(dt); return this.snapshot(); },
     render() { systems.renderer.draw(); },
     loop(frames = 60, dt = 1 / 60) {

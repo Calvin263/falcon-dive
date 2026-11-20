@@ -1,5 +1,6 @@
 import { DIVE_SPEED, CRASH_REVEAL_DELAY, THROW_LOCK_AIR, SHADOW_VISIBLE_ALT, HILL_SCROLL, LENS_R, DUST_DEVILS_ENABLED, HAZARD_BOUNTY, HAZARD_NAME, CATSENSE, SPIN_R, MOONSHOT_T, SPECIES, FALCON_SCALE, THERMAL_SPACING, RIDGE_SPACING, LAKE_SPACING, ROCKET_BLAST, CAT_REACH, CAT_ALT, HUNTER_AIM_T, HUNTER_RANGE, GROTTO_L, GROTTO_H, GROTTO_VENTS, VENT_R, OCTO_HP, OCTO_REACH, OCTO_HEAD_R, OUTLINE, SIGHT_COLOR, HEARING_COLOR, NO_SENSE_RANGE, IGNORE_DETECTION, GUN_MUZZLE, GRASS_COLORS, EYAS_S, HAZARD_SCALE } from '../config.js';
 import { clamp, wrapAngle, mixRGB, rgb, hash } from '../core/math.js';
+import { SKY } from '../config.js';
 
 export function createRenderer({ session, viewport, systems }) {
   const textCalls = [];
@@ -1484,6 +1485,7 @@ export function createRenderer({ session, viewport, systems }) {
     }
     try {
       if (session.screen === 'hunt' && !session.state.grotto && !session.state.moonshot) {
+        drawSkyWarnings();
         systems.hud.drawPreyIndicators();
         systems.hud.drawClosingHint();
         drawBirdLens();
@@ -1586,6 +1588,103 @@ export function createRenderer({ session, viewport, systems }) {
     }
   }
 
+  function drawSkyEncounters() {
+    const sky = session.state.sky, ctx = viewport.ctx;
+    const sx = systems.flight.toScreenX, sy = systems.flight.toScreenY;
+    const f = sky.fishnado;
+    if (f && !f.gone) {
+      const top = sy(f.alt + 32), bottom = sy(0), x = sx(f.x);
+      const w = 34 * session.cam.zoom;
+      ctx.save();
+      ctx.fillStyle = 'rgba(95,115,130,0.50)';
+      ctx.beginPath(); ctx.moveTo(x - w, top); ctx.lineTo(x + w, top);
+      ctx.lineTo(x + w * 0.18, bottom); ctx.lineTo(x - w * 0.18, bottom);
+      ctx.closePath(); ctx.fill();
+      ctx.strokeStyle = 'rgba(225,240,245,0.65)'; ctx.lineWidth = 2;
+      for (let i = 0; i < 6; i++) {
+        const a = (i / 6 + session.state.time * 0.13) % 1;
+        const y = bottom + (top - bottom) * a, width = w * (0.18 + a * 0.82);
+        ctx.beginPath(); ctx.ellipse(x, y, width, Math.max(2, 5 * session.cam.zoomY), 0, 0, Math.PI); ctx.stroke();
+      }
+      if (f.mode !== 'forming') {
+        ctx.fillStyle = f.hurtT > 0 ? '#fff' : f.mode === 'wind' ? '#53636c' : '#ffba49';
+        ctx.beginPath(); ctx.ellipse(x, sy(f.alt), 12 * session.cam.zoom, 12 * session.cam.zoomY, 0, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = '#fff'; ctx.font = 'bold 14px sans-serif'; ctx.textAlign = 'center';
+        ctx.fillText(f.mode === 'wind' ? 'WIND-UP' : 'CORE', x, sy(f.alt) + 5);
+      } else {
+        for (let i = 0; i < f.fish.length; i++) {
+          const a = 1 - f.t / 4, fx = f.x + Math.sin(session.state.time * 4 + i) * (5 + i * 2);
+          systems.sprites.drawFish(sx(fx), sy(Math.max(1, a * f.alt - i * 5)), { kind: f.fish[i].kind, vx: 1, ph: session.state.time }, 1);
+        }
+      }
+      for (const shot of f.shots) {
+        systems.sprites.drawFish(sx(shot.x), sy(shot.alt), { kind: shot.fish.kind, vx: shot.vx, ph: session.state.time }, 1.3);
+      }
+      ctx.restore();
+    }
+    const p = sky.pirates;
+    if (p && !p.gone) {
+      const x = sx(p.x), y = sy(p.alt);
+      ctx.save();
+      ctx.strokeStyle = '#eadab5'; ctx.lineWidth = 2;
+      for (const b of p.balloons) {
+        if (b.gone) continue;
+        const pos = systems.sky.balloonPosition(b), bx = sx(pos.x), by = sy(pos.alt);
+        ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(bx, by); ctx.stroke();
+        ctx.fillStyle = b.hurtT > 0 ? '#fff' : '#b43842';
+        ctx.beginPath(); ctx.ellipse(bx, by, 7 * session.cam.zoom, 7 * session.cam.zoomY, 0, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = '#fff'; ctx.font = 'bold 12px sans-serif'; ctx.textAlign = 'center'; ctx.fillText('☠', bx, by + 4);
+      }
+      ctx.fillStyle = p.hurtT > 0 ? '#fff' : '#705032';
+      ctx.fillRect(x - 9 * session.cam.zoom, y - 4 * session.cam.zoomY, 18 * session.cam.zoom, 8 * session.cam.zoomY);
+      ctx.restore();
+    }
+  }
+
+  function drawSkyWarnings() {
+    const sky = session.state.sky, ctx = viewport.ctx, sx = systems.flight.toScreenX, sy = systems.flight.toScreenY;
+    ctx.save();
+    const charged = session.state.fallers.filter(item => !item.done && item.chargeUntil != null);
+    if (session.bird.carrying?.chargeUntil != null) charged.push(session.bird);
+    ctx.strokeStyle = '#fff06a'; ctx.lineWidth = 2;
+    for (const item of charged) {
+      ctx.beginPath(); ctx.arc(sx(item.x), sy(item.alt), 13 + 3 * Math.sin(session.state.time * 14), 0, Math.PI * 2); ctx.stroke();
+    }
+    if (sky.strike) {
+      const s = sky.strike, x = sx(s.x), y = sy(s.alt);
+      ctx.strokeStyle = '#fff06a'; ctx.lineWidth = 3; ctx.setLineDash([8, 6]);
+      ctx.beginPath(); ctx.ellipse(x, y, SKY.strikeRadius * session.cam.zoom, SKY.strikeRadius * session.cam.zoomY, 0, 0, Math.PI * 2); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = '#fff'; ctx.font = 'bold 15px sans-serif'; ctx.textAlign = 'center'; ctx.fillText('LIGHTNING!', x, y - 12);
+    }
+    const f = sky.fishnado;
+    if (f && !f.gone && f.mode === 'wind') {
+      ctx.strokeStyle = '#ffdc65'; ctx.lineWidth = 3; ctx.setLineDash([8, 6]);
+      const angles = f.attack % 2 ? [f.aim - 0.28, f.aim, f.aim + 0.28] : [f.aim];
+      for (const angle of angles) {
+        ctx.beginPath(); ctx.moveTo(sx(f.x), sy(f.alt));
+        ctx.lineTo(sx(f.x + Math.cos(angle) * 180), sy(f.alt + Math.sin(angle) * 180)); ctx.stroke();
+      }
+      ctx.setLineDash([]);
+    }
+    const boss = [f, sky.pirates].filter(o => o && !o.gone && Math.hypot(o.x - session.bird.x, o.alt - session.bird.alt) < 650)
+      .sort((a, b) => Math.hypot(a.x - session.bird.x, a.alt - session.bird.alt) - Math.hypot(b.x - session.bird.x, b.alt - session.bird.alt))[0];
+    if (boss) {
+      const name = boss === f ? 'FISHNADO' : 'BALLOON PIRATES', max = boss === f ? SKY.fishnadoHp : SKY.pirateHp;
+      const w = Math.min(300, viewport.W * 0.6), x = (viewport.W - w) / 2, y = 94;
+      ctx.fillStyle = 'rgba(0,0,0,0.7)'; ctx.fillRect(x - 3, y - 3, w + 6, 24);
+      ctx.fillStyle = '#c94c42'; ctx.fillRect(x, y, w * Math.max(0, boss.hp) / max, 18);
+      ctx.fillStyle = '#fff'; ctx.font = 'bold 12px sans-serif'; ctx.textAlign = 'center'; ctx.fillText(`${name} ${Math.ceil(boss.hp)}/${max}`, viewport.W / 2, y + 13);
+      const tx = sx(boss.x), ty = sy(boss.alt);
+      if (tx < 30 || tx > viewport.W - 30 || ty < 125 || ty > viewport.H - 30) {
+        const x = clamp(tx, 48, viewport.W - 48), y = clamp(ty, 138, viewport.H - 30);
+        ctx.fillStyle = 'rgba(0,0,0,0.75)'; ctx.fillRect(x - 45, y - 16, 90, 22);
+        ctx.fillStyle = '#fff'; ctx.fillText(`${boss === f ? 'FISHNADO' : 'PIRATES'} ${Math.round(Math.hypot(boss.x - session.bird.x, boss.alt - session.bird.alt))}m`, x, y);
+      }
+    }
+    ctx.restore();
+  }
+
   function drawWorldScene() {
     drawBackground();
     drawSatelliteWorld();
@@ -1594,6 +1693,7 @@ export function createRenderer({ session, viewport, systems }) {
     session.prey.forEach(systems.sprites.drawPrey);
     drawHazardsBehind();
     drawGrass();
+    drawSkyEncounters();
     drawHazardsFront();
     drawFallers();
     drawRivals();

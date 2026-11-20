@@ -14,6 +14,17 @@ export function createHazards({ session, viewport, systems }) {
     for (const r of session.state.rivals) {
       if (r.gone) continue;
       r.prevX = r.x; r.prevAlt = r.alt;
+      if (r.frozenT > 0) { r.frozenT -= dt; continue; }
+      if (r.mode === 'pirate') {
+        if (r.pirate.gone) { r.gone = true; continue; }
+        const index = r.pirate.crew.indexOf(r);
+        const nx = r.pirate.x + (index ? 12 : -12), na = r.pirate.alt + 3;
+        r.vx = dt ? (nx - r.x) / dt : 0; r.vy = dt ? (na - r.alt) / dt : 0;
+        r.x = nx; r.alt = na; r.flapT += dt * 6;
+        if (!session.state.over) updateHunter(r, dt);
+        if (session.state.over) return;
+        continue;
+      }
       r.t -= dt; r.flapT += dt * 6;
       const dx = session.bird.x - r.x, dy = session.bird.alt - r.alt, d = Math.hypot(dx, dy);
       const fresh = session.state.lastCatch && session.state.time - session.state.lastCatch.t < systems.progression.stealWindow() && !session.state.lastCatch.stolen && !session.state.lastCatch.eyas;
@@ -29,7 +40,7 @@ export function createHazards({ session, viewport, systems }) {
             if (session.bird.carrying.kind === 'gun') {
               r.gun = { ammo: session.bird.carrying.ammo };
               Object.assign(r, { aim: 0, lock: 0, watch: 0, reload: HUNTER_RELOAD, flash: 0, tracer: 0, tracking: false });
-            }
+            } else if (session.bird.carrying.chargeUntil != null) r.turtle = session.bird.carrying;
             session.bird.carrying = null;
           } else if (fresh) {
             const e = session.state.lastCatch;
@@ -240,7 +251,7 @@ export function createHazards({ session, viewport, systems }) {
     const by = h.gun ? 'buzzard' : 'hunter', originAlt = shotAltitude(h);
     if (h.gun) {
       h.gun.ammo--;
-      systems.combat.achieve('armedBuzzard');
+      if (!h.pirate) systems.combat.achieve('armedBuzzard');
     }
     const trackedHit = h.crossfireHit;
     h.crossfireHit = null;
@@ -377,7 +388,8 @@ export function createHazards({ session, viewport, systems }) {
       hz.hawkT -= dt;
       if (hz.hawkT <= 0) { spawnHawk(); hz.hawkT = 60 - 30 * danger() + Math.random() * 20; }
     }
-    if (hz.hawk) updateHawk(hz.hawk, dt);
+    if (hz.hawk?.frozenT > 0) hz.hawk.frozenT -= dt;
+    else if (hz.hawk) updateHawk(hz.hawk, dt);
   }
   return { danger, killBird, newHazards, shotAltitude, updateHazards, updateHunter, updateRivals };
 }

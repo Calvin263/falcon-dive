@@ -29,7 +29,7 @@ export function createSession({ session, viewport, systems }) {
               devils: [], devilT: 15, rivals: [], rivalSeen: {}, hazards: systems.hazards.newHazards(), lastCatch: null,
               day: session.progress.day, dayCounts: {}, chainN: 0, chainT: -Infinity, bestChain: 1, steals: [],
               sunset: false, overT: 0, recap: null, eyases: [], featherFx: [], feathers: 0, bounces: 0, eyasHunt: true, achToday: [], toastQ: [], moonshot: null, bestLaunch: 0, satellite: null,
-              grotto: null, grottoCleared: {}, inks: [] };
+              grotto: null, grottoCleared: {}, inks: [], sky: systems.sky.newState() };
     systems.prey.spawnPreyAhead();
   }
 
@@ -46,6 +46,7 @@ export function createSession({ session, viewport, systems }) {
 
   function endDay(reason) {
     if (session.state.over) return;
+    systems.sky.retireAll();
     session.state.over = true;
     session.state.overT = 0;
     session.mouse.down = false; session.mouse.aiming = false; session.mouse.throwHeld = false; session.mouse.talonTarget = null;

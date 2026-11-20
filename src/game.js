@@ -9,6 +9,7 @@ import { createHazards } from './simulation/hazards.js';
 import { createCompanions } from './simulation/companions.js';
 import { createWater } from './simulation/water.js';
 import { createFlight } from './simulation/flight.js';
+import { createSkyEncounters } from './simulation/sky.js';
 import { createRenderer } from './rendering/renderer.js';
 import { createSprites } from './rendering/sprites.js';
 import { createHud } from './rendering/hud.js';
@@ -29,6 +30,7 @@ export function createGame(viewport, { storage = createStorage() } = {}) {
   systems.hazards = createHazards(context);
   systems.companions = createCompanions(context);
   systems.water = createWater(context);
+  systems.sky = createSkyEncounters(context);
   systems.flight = createFlight(context);
   systems.renderer = createRenderer(context);
   systems.sprites = createSprites(context);

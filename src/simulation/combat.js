@@ -38,6 +38,7 @@ export function createCombat({ session, viewport, systems }) {
     for (const f of session.state.fallers) if (!f.done && f.alt > 0.5) out.push([f.x, f.alt, w, { type: 'skeet', f }]);
     const sat = session.state.satellite;
     if (sat && !sat.down) out.push([sat.x, sat.alt, w + SAT_R, { type: 'sat', sat }]);
+    out.push(...systems.sky.targets());
     return out;
   }
 
@@ -89,6 +90,8 @@ export function createCombat({ session, viewport, systems }) {
       const f = hit.f;
       f.gone = true;
       systems.prey.award({ kind: f.kind, speed: session.bird.speed, water: true, shot, method, depth: -f.alt }, systems.session.priceCatch(f.kind, { unseen: !f.spooked }), `${verb} ${SPECIES[f.kind].name}`);
+    } else if (hit.type === 'sky') {
+      systems.sky.hitPart(hit.part, method, verb === 'BOOM!' ? 3 : 1);
     } else if (hit.type === 'octo') {
       systems.water.octoHit(hit, verb, method);
     } else if (hit.type === 'sat') {
@@ -328,6 +331,7 @@ export function createCombat({ session, viewport, systems }) {
     for (let i = 0; i < 20; i++) session.particles.push({
       x: member.x ?? p.x, alt: Math.max(0.5, member.alt ?? 0.5), vx: (Math.random() - 0.5) * 16, vy: Math.random() * 10, life: 1
     });
+    systems.sky.impact(f, member.x ?? p.x, member.alt ?? 0);
     if (p.kind !== 'flock') { f.struck = true; ricochet(f); }
   }
 
@@ -372,6 +376,7 @@ export function createCombat({ session, viewport, systems }) {
     r.mode = 'leave'; r.t = 4; r.alertT = 0.8;
     f.struck = true;
     f.hitBuzzard = true;
+    systems.sky.impact(f, f.x, f.alt);
     ricochet(f);
   }
 
@@ -408,6 +413,7 @@ export function createCombat({ session, viewport, systems }) {
       f.x += f.vx * dt; f.alt += f.vy * dt; f.spin += dt * 5;
 
       if (!(f.struck && f.alt > 0 && !f.hitBuzzard)) {
+        if (systems.sky.shellHit(f, dt)) continue;
         for (const r of session.state.rivals) {
           if (r.gone) continue;
           if (Math.hypot(r.x - f.x, r.alt - f.alt) < 5) {
@@ -426,6 +432,7 @@ export function createCombat({ session, viewport, systems }) {
       if (f.alt > 0) continue;
       const lake = systems.world.lakeAtX(f.x);
       if (lake) {
+        systems.sky.ground(f, f.x);
         f.done = true;
         systems.water.splashAt(f.x, lake);
         systems.prey.award({ kind: 'turtle', speed: Math.hypot(f.vx, f.vy), drowned: true, water: true, method: 'water' },
@@ -436,6 +443,7 @@ export function createCombat({ session, viewport, systems }) {
       if (f.struck || f.hitBuzzard) {
         f.done = true;
         const t = systems.prey.makeGround(f.x, 'turtle');
+        if (f.chargeUntil != null) t.chargeUntil = f.chargeUntil;
         session.prey.push(t);
         continue;
       }
@@ -447,7 +455,7 @@ export function createCombat({ session, viewport, systems }) {
       // A ground hit that ricocheted is airborne again
       if (f.bounced) { f.bounced = false; f.done = false; continue; }
       // A ricochet that missed its next target just lands; the turtle walks off
-      if (f.ricochets) { const t = systems.prey.makeGround(f.x, 'turtle'); session.prey.push(t); continue; }
+      if (f.ricochets) { const t = systems.prey.makeGround(f.x, 'turtle'); if (f.chargeUntil != null) t.chargeUntil = f.chargeUntil; session.prey.push(t); continue; }
       const impact = Math.hypot(f.vx, f.vy);
       if (impact >= SHELL_CRACK_SPEED) {
         systems.prey.award({ kind: 'turtle', speed: impact, drop: f.dropAlt }, systems.session.priceCatch('turtle', { impact }), 'Shell cracked!');
@@ -456,6 +464,7 @@ export function createCombat({ session, viewport, systems }) {
         });
       } else {
         const t = systems.prey.makeGround(f.x, 'turtle');
+        if (f.chargeUntil != null) t.chargeUntil = f.chargeUntil;
         session.prey.push(t);
         if (!f.struck) {
           session.state.msg = `Hit at ${(impact * 3.6).toFixed(0)} km/h — the turtle walked away (need ${(SHELL_CRACK_SPEED * 3.6).toFixed(0)})`;

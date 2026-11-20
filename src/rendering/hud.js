@@ -200,6 +200,10 @@ export function createHud({ session, viewport, systems }) {
         ? 'Right-click: aim / release to fire' : 'Right-click: release to fire ahead', '#ffdd55']);
       rows.push(['Space: drop', '#9aa7b8']);
     } else if (session.bird.carrying) {
+      if (session.bird.carrying.chargeUntil != null) {
+        const remaining = Math.max(0, session.bird.carrying.chargeUntil - session.state.time);
+        rows.push([`LIGHTNING TURTLE: DROP! ${remaining.toFixed(1)} s`, remaining <= 2 ? '#ff7777' : '#ffe15c']);
+      }
       const impact = systems.combat.predictImpact(session.bird.alt, session.bird.vx, session.bird.vy);
       const ready = impact >= SHELL_CRACK_SPEED;
       const est = systems.session.priceCatch('turtle', { impact }, true).value;
@@ -446,6 +450,13 @@ export function createHud({ session, viewport, systems }) {
       viewport.ctx.quadraticCurveTo(ix + 10 * k, iy, ix + 5 * k, iy + 3 * k); viewport.ctx.lineTo(ix + 2 * k, iy + 3 * k); viewport.ctx.fill();
       viewport.ctx.strokeStyle = '#fff'; viewport.ctx.lineWidth = 1.5 * k;
       for (const a of [-0.6, 0, 0.6]) { viewport.ctx.beginPath(); viewport.ctx.moveTo(ix - 9 * k, iy + a * 8 * k); viewport.ctx.lineTo(ix - 13 * k, iy + a * 11 * k); viewport.ctx.stroke(); }
+    } else if (targetKind === 'fishnado') {
+      viewport.ctx.fillStyle = '#657983';
+      viewport.ctx.beginPath(); viewport.ctx.moveTo(ix - 10 * k, iy - 8 * k); viewport.ctx.lineTo(ix + 10 * k, iy - 8 * k); viewport.ctx.lineTo(ix, iy + 11 * k); viewport.ctx.closePath(); viewport.ctx.fill();
+      viewport.ctx.fillStyle = '#ffe15c'; viewport.ctx.beginPath(); viewport.ctx.arc(ix, iy - 2 * k, 3 * k, 0, Math.PI * 2); viewport.ctx.fill();
+    } else if (targetKind === 'pirates') {
+      viewport.ctx.fillStyle = '#b43842'; viewport.ctx.beginPath(); viewport.ctx.arc(ix, iy - 5 * k, 7 * k, 0, Math.PI * 2); viewport.ctx.fill();
+      viewport.ctx.fillStyle = '#705032'; viewport.ctx.fillRect(ix - 6 * k, iy + 5 * k, 12 * k, 5 * k);
     } else if (targetKind === 'hawk') {
       systems.renderer.drawHawk(ix, iy, { mode: 'stalk', flapT: 1.2, vx: 1, vy: 0 }, 0.85 * k);
     } else {

@@ -52,7 +52,7 @@ export function createScreens({ session, viewport, systems }) {
     drawPanel(x0, y0, pw, ph);
 
     viewport.ctx.textAlign = 'center';
-    const ended = { crash: 'Crashed', cat: 'Caught by a cat', hunter: 'Shot by a hunter', buzzard: 'Shot by a buzzard', hawk: 'Taken by a goshawk', octopus: 'Grabbed by the octopus', drown: 'Drowned' }[r.reason];
+    const ended = { crash: 'Crashed', cat: 'Caught by a cat', hunter: 'Shot by a hunter', buzzard: 'Shot by a buzzard', hawk: 'Taken by a goshawk', octopus: 'Grabbed by the octopus', drown: 'Drowned', lightning: 'Electrocuted by a turtle', fishnado: 'Hit by a flying fish' }[r.reason];
     viewport.ctx.fillStyle = r.reason === 'moon' ? '#ffd34d' : ended ? '#ff7766' : '#ffd34d';
     viewport.ctx.font = 'bold 28px sans-serif';
     viewport.ctx.fillText(r.reason === 'moon' ? `Day ${r.day} — 🌕 Reached the moon at ${r.clock}` : `Day ${r.day} — ${ended ? `${ended} at ${r.clock}` : 'Sunset'}`, viewport.W / 2, y0 + 42);

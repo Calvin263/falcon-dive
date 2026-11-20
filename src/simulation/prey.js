@@ -433,7 +433,7 @@ export function createPrey({ session, viewport, systems }) {
       if (!((Math.abs(dx) < s.radius || crossed) && session.bird.alt < s.catchAlt * STATS.catchAlt[systems.progression.tier('talons')])) return;
       if (p.kind === 'turtle') {
         p.gone = true;
-        session.bird.carrying = { kind: 'turtle' };
+        session.bird.carrying = { kind: 'turtle', ...(p.chargeUntil != null ? { chargeUntil: p.chargeUntil } : {}) };
         session.state.msg = 'Got the turtle! Drop it hard enough to crack the shell';
         session.state.msgT = 2;
         return;
@@ -515,7 +515,7 @@ export function createPrey({ session, viewport, systems }) {
     const d = dt ? sweptDist(target.x, target.alt, dt) : Math.hypot(target.x - session.bird.x, target.alt - session.bird.alt);
     if (d > systems.progression.talonGrabRange()) return;
     target.done = true;
-    session.bird.carrying = { kind: 'turtle', midair: true };
+    session.bird.carrying = { kind: 'turtle', midair: true, ...(target.chargeUntil != null ? { chargeUntil: target.chargeUntil } : {}) };
     session.state.msg = 'Talon grab! Turtle in hand';
     session.state.msgT = 2;
   }
@@ -530,7 +530,8 @@ export function createPrey({ session, viewport, systems }) {
     }
     const { vx, vy } = throwVelocity(aimed);
     const target = aimed && systems.progression.turtleHoming() > 0 ? pickThrowTarget(simulateThrow(session.bird.x, session.bird.alt, vx, vy)) : null;
-    session.state.fallers.push({ x: session.bird.x, alt: session.bird.alt, vx, vy, dropAlt: session.bird.alt, spin: 0, target, homing: systems.progression.turtleHoming(), bounces: AIM_STATS.bounces[systems.progression.aimTier()] });
+    const chargeUntil = session.bird.carrying.chargeUntil;
+    session.state.fallers.push({ x: session.bird.x, alt: session.bird.alt, vx, vy, dropAlt: session.bird.alt, spin: 0, target, homing: systems.progression.turtleHoming(), bounces: AIM_STATS.bounces[systems.progression.aimTier()], ...(chargeUntil != null ? { chargeUntil } : {}) });
     session.bird.carrying = null;
   }
 
@@ -594,7 +595,7 @@ export function createPrey({ session, viewport, systems }) {
     const hz = session.state.hazards, out = [];
     for (const h of hz.hunters) if (!h.gone) out.push({ kind: 'hunter', x: h.x, alt: 0, air: false, target: h });
     if (hz.hawk && !hz.hawk.gone) out.push({ kind: 'hawk', x: hz.hawk.x, alt: hz.hawk.alt, air: true, target: hz.hawk });
-    return out;
+    return out.concat(systems.sky.throwTargets());
   }
 
   // Body boxes: a hunter stands ~1.9 m tall, a cat ~0.6 m; the goshawk is hit like a buzzard
@@ -620,6 +621,7 @@ export function createPrey({ session, viewport, systems }) {
     removeHazard(kind, obj);
     f.struck = true;
     f.hitBuzzard = true;
+    systems.sky.impact(f, f.x, f.alt);
     systems.combat.ricochet(f);
   }
 
@@ -633,8 +635,12 @@ export function createPrey({ session, viewport, systems }) {
       session.state.guns.push({ x: obj.x, alt: 1.5, vx: (Math.random() - 0.5) * 8, vy: GUN_THROW_VY, ammo: systems.combat.gunStat('ammo') });
     }
     if (kind === 'buzzard' && obj.gun) {
-      session.state.guns.push({ x: obj.x, alt: obj.alt, vx: obj.vx || 0, vy: GUN_THROW_VY, ammo: obj.gun.ammo });
+      if (obj.gun.ammo > 0) session.state.guns.push({ x: obj.x, alt: obj.alt, vx: obj.vx || 0, vy: GUN_THROW_VY, ammo: obj.gun.ammo });
       obj.gun = null;
+    }
+    if (kind === 'buzzard' && obj.turtle) {
+      session.state.fallers.push({ x: obj.x, alt: obj.alt, vx: obj.vx || 0, vy: obj.vy || 0, spin: 0, ...obj.turtle });
+      obj.turtle = null;
     }
     for (let i = 0; i < 20; i++) session.particles.push({
       x: obj.x, alt: Math.max(0.5, obj.alt || 1), vx: (Math.random() - 0.5) * 18, vy: Math.random() * 12, life: 1.1
