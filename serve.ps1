@@ -7,15 +7,51 @@ $mime = @{
   '.wav' = 'audio/wav'; '.mp3' = 'audio/mpeg'; '.ogg' = 'audio/ogg'; '.ico' = 'image/x-icon'
 }
 
-Write-Host "Starting server on port $Port"
+$shutdown = $null
+$previewLock = $null
+$ownsPreviewLock = $false
 $listener = New-Object System.Net.HttpListener
-$listener.Prefixes.Add("http://localhost:$Port/")
-$listener.Start()
-Write-Host "Serving $root at http://localhost:$Port/"
 
 try {
+  if ($Port -ge 8080 -and $Port -le 8089) {
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { $key = [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($root.ToUpperInvariant()))) }
+    finally { $sha.Dispose() }
+    $previewLock = [Threading.Mutex]::new($false, "Local\FalconDive-$key-preview")
+    $shutdown = [Threading.EventWaitHandle]::new($false, [Threading.EventResetMode]::ManualReset, "Local\FalconDive-$key-stop")
+    try {
+      $ownsPreviewLock = $previewLock.WaitOne(0)
+      if (-not $ownsPreviewLock) {
+        Write-Host 'Stopping the existing Falcon Dive preview on 808x'
+        [void]$shutdown.Set()
+        $ownsPreviewLock = $previewLock.WaitOne(5000)
+      }
+    } catch [Threading.AbandonedMutexException] {
+      $ownsPreviewLock = $true
+    }
+    if (-not $ownsPreviewLock) { throw 'The existing Falcon Dive preview did not stop within five seconds.' }
+    [void]$shutdown.Reset()
+  }
+
+  Write-Host "Starting server on port $Port"
+  $listener.Prefixes.Add("http://localhost:$Port/")
+  $listener.Start()
+  Write-Host "Serving $root at http://localhost:$Port/"
+
   while ($listener.IsListening) {
-    $ctx = $listener.GetContext()
+    if ($shutdown) {
+      $pending = $listener.BeginGetContext($null, $null)
+      $requestReady = $pending.AsyncWaitHandle
+      try {
+        if ([Threading.WaitHandle]::WaitAny(@($shutdown, $requestReady)) -eq 0) { break }
+        $ctx = $listener.EndGetContext($pending)
+      } finally {
+        if (-not $pending.IsCompleted) { $listener.Close() }
+        $requestReady.Dispose()
+      }
+    } else {
+      $ctx = $listener.GetContext()
+    }
     $res = $ctx.Response
     try {
       $rel = [Uri]::UnescapeDataString($ctx.Request.Url.AbsolutePath).TrimStart('/')
@@ -39,5 +75,8 @@ try {
     }
   }
 } finally {
-  $listener.Stop()
+  $listener.Close()
+  if ($ownsPreviewLock) { $previewLock.ReleaseMutex() }
+  if ($shutdown) { $shutdown.Dispose() }
+  if ($previewLock) { $previewLock.Dispose() }
 }

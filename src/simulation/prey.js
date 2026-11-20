@@ -68,6 +68,12 @@ export function createPrey({ session, viewport, systems }) {
         session.prey.push(d);
       }
       for (let n = 0; n < 4 + Math.floor(Math.random() * 4); n++) session.state.fish.push(systems.water.makeFish(l, Math.random() < 0.7 ? 'trout' : 'pike'));
+      if (l.vents) {
+        const [, lower, bottom] = l.vents;
+        const descent = (lower.x + bottom.x) / 2;
+        for (let count = 0; count < 3; count++) session.state.fish.push(systems.water.makeFish(l, 'lanternfish', descent));
+        session.state.fish.push(systems.water.makeFish(l, 'anglerfish', bottom.x));
+      }
     }
     for (const i of s.lakes) {
       const l = systems.world.lakeAt(i);

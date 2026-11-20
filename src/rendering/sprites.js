@@ -109,18 +109,33 @@ export function createSprites({ session, viewport, systems }) {
 
   // y is the ground line for ground species, the body centre for flying ones
   function drawFish(x, y, f, s) {
-    const pike = f.kind === 'pike', L = pike ? 11 : 7, Hh = pike ? 2 : 2.4;
+    const pike = f.kind === 'pike', angler = f.kind === 'anglerfish', lantern = f.kind === 'lanternfish';
+    const L = pike || angler ? 11 : 7, Hh = angler ? 6 : pike ? 2 : 2.4;
     const wag = Math.sin((f.ph || 0) * (f.fleeT > 0 ? 18 : 6)) * 0.35;
     viewport.ctx.save();
     viewport.ctx.translate(x, y);
     viewport.ctx.scale((f.vx < 0 ? -1 : 1) * s, s);
-    viewport.ctx.fillStyle = pike ? '#5d6b3a' : '#8a9a8c';
+    viewport.ctx.fillStyle = angler ? '#644e64' : lantern ? '#486b83' : pike ? '#5d6b3a' : '#8a9a8c';
     viewport.ctx.beginPath(); viewport.ctx.moveTo(-L + 1, 0); viewport.ctx.lineTo(-L - 4, -3 + wag * 4); viewport.ctx.lineTo(-L - 4, 3 + wag * 4); viewport.ctx.fill();
     viewport.ctx.beginPath(); viewport.ctx.ellipse(0, 0, L, Hh, 0, 0, Math.PI * 2); viewport.ctx.fill();
-    viewport.ctx.fillStyle = pike ? '#c9c79a' : '#e0b0b0';
+    viewport.ctx.fillStyle = angler ? '#a28493' : lantern ? '#8bb6c3' : pike ? '#c9c79a' : '#e0b0b0';
     viewport.ctx.beginPath(); viewport.ctx.ellipse(0, Hh * 0.45, L * 0.75, Hh * 0.35, 0, 0, Math.PI * 2); viewport.ctx.fill();
-    viewport.ctx.fillStyle = pike ? 'rgba(220,220,150,0.7)' : 'rgba(40,40,40,0.6)';
-    for (let i = 0; i < 4; i++) viewport.ctx.fillRect(-L * 0.6 + i * L * 0.35, -Hh * 0.6, pike ? 1 : 0.8, pike ? Hh : 0.8);
+    if (angler) {
+      const tipY = -8 + Math.sin((f.ph || 0) * 2) * 1.2;
+      viewport.ctx.strokeStyle = '#b89aa7'; viewport.ctx.lineWidth = 0.9;
+      viewport.ctx.beginPath(); viewport.ctx.moveTo(3, -4); viewport.ctx.quadraticCurveTo(9, -15, 13, tipY); viewport.ctx.stroke();
+      viewport.ctx.fillStyle = 'rgba(172,255,194,0.25)';
+      viewport.ctx.beginPath(); viewport.ctx.arc(13, tipY, 3.1, 0, Math.PI * 2); viewport.ctx.fill();
+      viewport.ctx.fillStyle = '#d1ffab';
+      viewport.ctx.beginPath(); viewport.ctx.arc(13, tipY, 1.5, 0, Math.PI * 2); viewport.ctx.fill();
+      viewport.ctx.fillStyle = '#271e2b';
+      viewport.ctx.beginPath(); viewport.ctx.ellipse(6.5, 2, 4.5, 2, -0.15, 0, Math.PI * 2); viewport.ctx.fill();
+      viewport.ctx.fillStyle = '#ecd6cb';
+      for (let tooth = 0; tooth < 3; tooth++) viewport.ctx.fillRect(4 + tooth * 2.1, 0.7, 0.8, 1.6);
+    } else {
+      viewport.ctx.fillStyle = lantern ? '#9dfff3' : pike ? 'rgba(220,220,150,0.7)' : 'rgba(40,40,40,0.6)';
+      for (let i = 0; i < 4; i++) viewport.ctx.fillRect(-L * 0.6 + i * L * 0.35, lantern ? 0.6 : -Hh * 0.6, pike ? 1 : 0.8, pike ? Hh : 0.8);
+    }
     viewport.ctx.fillStyle = '#111';
     viewport.ctx.beginPath(); viewport.ctx.arc(L * 0.7, -0.5, 0.6, 0, Math.PI * 2); viewport.ctx.fill();
     viewport.ctx.restore();
@@ -136,7 +151,7 @@ export function createSprites({ session, viewport, systems }) {
       case 'pigeon': return drawPigeon(x, y, p, s);
       case 'duck': return drawPigeon(x, y, p, s, true);
       case 'swift': return drawSwift(x, y, p, s);
-      case 'trout': case 'pike': return drawFish(x, y, { kind, vx: p.vx ?? 1, ph: 0 }, s);
+      case 'trout': case 'pike': case 'lanternfish': case 'anglerfish': return drawFish(x, y, { kind, vx: p.vx ?? 1, ph: 0 }, s);
       case 'flock':
         for (let i = 0; i < 5; i++) {
           drawStarling(x + ((i % 3) - 1) * 9 * s, y + (i < 3 ? -4 : 5) * s, (p.flapT || 0) + i, s, p.vx ?? 1);

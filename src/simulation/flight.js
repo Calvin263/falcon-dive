@@ -152,7 +152,7 @@ export function createFlight({ session, viewport, systems }) {
       // Underwater: heavy drag bleeds off the plunge, then you paddle toward the cursor while your breath lasts;
       // buoyancy is mild until you run out of air, then it carries you up
       let wvx = Math.cos(session.bird.angle) * session.bird.speed, wvy = Math.sin(session.bird.angle) * session.bird.speed;
-      session.bird.breath = Math.max(0, (session.bird.breath ?? systems.progression.swimBreath()) - dt);
+      systems.water.updateLakeBreath(session.bird.inWater, dt);
       const sp0 = Math.hypot(wvx, wvy), swimTop = systems.progression.swimSpeed();
       if (sp0 > swimTop) {
         const k = Math.max(swimTop / sp0, Math.exp(-WATER_DRAG * dt));
@@ -279,6 +279,8 @@ export function createFlight({ session, viewport, systems }) {
         session.bird.inWater = lake; session.bird.entrySpeed = session.bird.speed; session.bird.breath = systems.progression.swimBreath(); session.bird.bouncing = null;
         systems.water.splashAt(session.bird.x, lake);
         session.cam.shake = 0;
+        session.cam.surfaceAlt = session.cam.alt;
+        session.cam.pin = null;
         if (!session.progress.swum) {
           session.progress.swum = true; systems.progression.saveProgress();
           systems.combat.toast('New upgrade unlocked in the Roost: Swimming', 4);
@@ -291,8 +293,7 @@ export function createFlight({ session, viewport, systems }) {
         const wvx = Math.cos(session.bird.angle) * session.bird.speed, wvy = Math.max(0, Math.sin(session.bird.angle) * session.bird.speed);
         session.bird.speed = Math.max(0.3, Math.hypot(wvx, wvy)); session.bird.angle = Math.atan2(wvy, wvx);
       }
-      // The cave mouth at the far end of the lake bed leads into the Octopus Grotto
-      if (systems.water.grottoOpen(lake) && session.bird.breath > 0 && session.bird.vx > 0 && session.bird.x > lake.x0 + lake.w - 4 && session.bird.alt < -(lake.depth - 5)) {
+      if (systems.water.atGrottoMouth(lake)) {
         systems.water.enterGrotto(lake);
         return;
       }
@@ -451,7 +452,7 @@ export function createFlight({ session, viewport, systems }) {
       const d = distTo(p), v = Math.max(1, session.bird.speed);
       return d < 1 ? 1 : ((p.x - session.bird.x) * session.bird.vx + (p.alt - session.bird.alt) * session.bird.vy) / (d * v);
     };
-    const airOk = p => p && SPECIES[p.kind].air && !p.gone && !p.spent && !p.sitting && (p.flyT ?? 0) > CHASE_MIN_FLY;
+    const airOk = p => !session.bird.inWater && p && SPECIES[p.kind].air === true && !p.gone && !p.spent && !p.sitting && (p.flyT ?? 0) > CHASE_MIN_FLY;
     // High up, birds look tiny: frame chases from further out and zoom in much closer
     const hiK = clamp((session.bird.alt - 120) / 150, 0, 1);
     const focusDist = AIR_FOCUS_DIST * (1 + 0.8 * hiK), chaseMax = CHASE_ZOOM_MAX + 2.3 * hiK, frameK = 0.15 + 0.1 * hiK;
@@ -467,7 +468,7 @@ export function createFlight({ session, viewport, systems }) {
     }
     session.cam.lock = lock;
     // Losing the target (usually a catch) would reframe the shot; pin the bird on screen instead
-    if (prevLock && lock !== prevLock && session.cam.focus > 0.1) holdCamera();
+    if (!session.bird.inWater && prevLock && lock !== prevLock && session.cam.focus > 0.1) holdCamera();
     const td = lock ? distTo(lock) : Infinity;
     const want = lock ? Math.min(1, (focusDist - td) / (30 + 30 * hiK)) : 0;
     session.cam.focus += (want - session.cam.focus) * Math.min(1, dt * (want > session.cam.focus ? 1.5 : 1));
@@ -506,16 +507,26 @@ export function createFlight({ session, viewport, systems }) {
         ca = lerp(ca, session.bird.alt - (viewport.H / 2 - pin.sy) / zoomY, pinK);
       }
     }
-    // Never show more underground than the ground band at the bottom (or, over a lake, its full depth),
-    // nor more than a sliver above the ceiling
-    const wl = session.bird.alt < 60 && systems.world.lakeAtX(session.bird.x);
-    const floorPx = wl ? Math.max(systems.progression.groundPx(), (wl.depth + 1) * zoomY) : systems.progression.groundPx();
+    // Keep the ground band consistent until the bird commits to a dive.
+    const floorPx = systems.progression.groundPx();
     session.cam.floorPx = Number.isFinite(session.cam.floorPx) ? session.cam.floorPx + (floorPx - session.cam.floorPx) * Math.min(1, dt * 2) : floorPx;
     ca = Math.max(ca, (viewport.H / 2 - session.cam.floorPx) / zoomY);
     // Bounces can fly far above the ceiling: let the camera follow them up (easing back once they end)
     const liftWant = session.bird.bouncing ? Math.max(0, session.bird.alt + 40 - session.MAX_ALT) : 0;
     session.cam.ceilLift = Number.isFinite(session.cam.ceilLift) ? session.cam.ceilLift + (liftWant - session.cam.ceilLift) * Math.min(1, dt * (liftWant > session.cam.ceilLift ? 20 : 2)) : 0;
     ca = Math.min(ca, session.MAX_ALT + CEILING_MARGIN + session.cam.ceilLift - viewport.H / 2 / zoomY);
+    if (!session.bird.inWater || session.bird.alt > -0.75) session.cam.diveFollow = false;
+    else if (session.bird.alt <= -3 && session.bird.vy < 0) session.cam.diveFollow = true;
+    const waterFrame = lerp(session.cam.waterFrame ?? 0, session.cam.diveFollow ? 1 : 0, Math.min(1, dt * 5));
+    session.cam.waterFrame = waterFrame < 0.001 ? 0 : waterFrame;
+    if (session.bird.inWater || session.cam.waterFrame) {
+      const surfaceAlt = session.bird.inWater ? (session.cam.surfaceAlt ?? ca) : ca;
+      const swimZoom = Math.max(zoom, Math.min(viewport.H / 38, viewport.W / 44));
+      ca = lerp(surfaceAlt, Math.min(0, session.bird.alt + session.bird.vy * 0.18), waterFrame);
+      cx = lerp(cx, session.bird.x + session.bird.vx * 0.25, waterFrame);
+      zoom = zoomY = lerp(zoom, swimZoom, waterFrame);
+      if (session.bird.inWater && waterFrame > 0) ca = Math.min(ca, session.bird.alt + viewport.H * 0.4 / zoomY);
+    }
     session.cam.zoom = zoom; session.cam.zoomY = zoomY; session.cam.alt = ca; session.cam.x = cx;  session.cam.shake = Math.max(0, (session.bird.speed - 50) / 45) * 4 + (braking ? 3 : 0);
   }
   function birdAboveScreen() { return toScreenY(session.bird.alt) < 8; }

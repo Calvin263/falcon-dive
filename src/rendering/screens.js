@@ -113,6 +113,10 @@ export function createScreens({ session, viewport, systems }) {
   function drawShop() {
     viewport.ctx.fillStyle = '#080f1c';
     viewport.ctx.fillRect(0, 0, viewport.W, viewport.H);
+    if (session.achView) {
+      drawAchievements();
+      return;
+    }
     viewport.ctx.textAlign = 'left'; viewport.ctx.fillStyle = '#ffd34d'; viewport.ctx.font = 'bold 28px sans-serif';
     viewport.ctx.fillText('The Roost', 16, 36);
     viewport.ctx.textAlign = 'center';
@@ -177,7 +181,6 @@ export function createScreens({ session, viewport, systems }) {
       viewport.ctx.textAlign = 'right'; viewport.ctx.fillStyle = '#9aa7b8'; viewport.ctx.font = '12px sans-serif';
       viewport.ctx.fillText(`Best day $${session.progress.best.earned}  ·  top speed ${session.progress.best.speed} km/h`, viewport.W - 16, viewport.H - 58);
     }
-    if (session.achView) drawAchievements();
   }
 
   function shopMetrics() {
@@ -190,10 +193,8 @@ export function createScreens({ session, viewport, systems }) {
     return { top, bottom, rows, cols, tileHeight, gap, contentHeight, scroll: 0, maxScroll: 0 };
   }
 
-  // Achievement list over the Roost: earned ones in gold with the day, the rest dimmed
   function drawAchievements() {
     session.uiButtons = [];
-    viewport.ctx.fillStyle = 'rgba(0,0,0,0.6)'; viewport.ctx.fillRect(0, 0, viewport.W, viewport.H);
     const list = systems.progression.visibleAchievements();
     const cols = viewport.W >= 900 ? 2 : 1, gap = 10;
     const rows = Math.ceil(list.length / cols);

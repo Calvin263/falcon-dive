@@ -335,13 +335,76 @@ test('hidden achievements show placeholder descriptions until earned, without ro
   expect(unlocked.filter(label => label === 'hidden achievement')).toHaveLength(ACHIEVEMENTS.filter(a => a.hidden).length - 1);
 });
 
+test('a generated deep basin can be explored on starting breath', async ({ page }, testInfo) => {
+  const route = await page.evaluate(async ({ width, height }) => {
+    const { createWorld } = await import('/src/simulation/world.js');
+    const game = window.__falconDiveDebug;
+    game.resetProgress();
+    game.startDay();
+    game.session.worldSeed = 256;
+    const world = createWorld({ session: game.session });
+    const lake = Array.from({ length: 60 }, (_, index) => world.lakeAt(index - 30)).find(candidate => candidate.mouth);
+    const [shelf, lower, bottom] = lake.vents;
+    const { bird, cam, session } = game;
+    Object.assign(bird, { x: shelf.x, alt: 1, angle: -Math.PI / 2, speed: 28 });
+    Object.assign(cam, { x: shelf.x, alt: 25 });
+    const aim = ({ x, alt }) => {
+      const angle = Math.atan2(alt - bird.alt, x - bird.x);
+      const effort = Math.min(width, height) * 0.3;
+      session.mouse.x = width / 2 + (bird.x - cam.x) * cam.zoom + Math.cos(angle) * effort;
+      session.mouse.y = height / 2 - (bird.alt - cam.alt) * cam.zoomY - Math.sin(angle) * effort;
+      game.step();
+    };
+    const refill = vent => {
+      let minimum = Infinity;
+      for (let frame = 0; frame < 360; frame++) {
+        aim(vent);
+        if (bird.inWater) minimum = Math.min(minimum, bird.breath);
+        if (bird.breath >= 6.7 && Math.hypot(bird.x - vent.x, bird.alt - vent.alt) < 1.7) break;
+      }
+      return { minimum, breath: bird.breath, depth: -bird.alt };
+    };
+    aim(shelf);
+    const surfaceFrame = cam.waterFrame;
+    const first = refill(shelf);
+    const second = refill(lower);
+    const deepest = refill(bottom);
+    const diveFrame = cam.waterFrame;
+    game.render();
+    const canvas = document.querySelector('#game');
+    const basinImage = canvas.toDataURL();
+    const returnFromBottom = refill(lower);
+    const mouth = { x: lake.mouth.x + lake.mouth.direction * 3, alt: lake.mouth.alt };
+    for (let frame = 0; frame < 240 && !game.state.grotto; frame++) aim(mouth);
+    const entered = !!game.state.grotto;
+    if (entered) {
+      Object.assign(bird, { x: 0.4, angle: Math.PI, speed: 0.3 });
+      game.step(0.01);
+    }
+    const retreat = entered && !game.state.grotto ? [refill(lower), refill(shelf)] : [];
+    return { surfaceFrame, first, second, deepest, returnFromBottom, diveFrame, entered, retreat, basinImage };
+  }, page.viewportSize());
+  expect(route.surfaceFrame).toBe(0);
+  expect(route.diveFrame).toBeGreaterThan(0.9);
+  expect(route.first.depth).toBeGreaterThan(8);
+  expect(route.second.depth).toBeGreaterThan(19);
+  expect(route.deepest.depth).toBeGreaterThan(39);
+  expect(route.entered).toBe(true);
+  expect(route.retreat).toHaveLength(2);
+  for (const [index, stop] of [route.first, route.second, route.deepest, route.returnFromBottom, ...route.retreat].entries()) {
+    expect(stop.minimum, `minimum air on leg ${index + 1}`).toBeGreaterThan(0);
+    expect(stop.breath, `air after leg ${index + 1}`).toBeGreaterThanOrEqual(6.7);
+  }
+  await testInfo.attach('generated basin', { body: Buffer.from(route.basinImage.split(',')[1], 'base64'), contentType: 'image/png' });
+});
+
 test('grotto has varied contours and a visible sealed end, with an earlier retreating octopus', async ({ page }, testInfo) => {
   const entrance = await page.evaluate(() => {
     const game = window.__falconDiveDebug;
     game.resetProgress();
     game.startDay();
-    const lake = { x0: 1000, w: 100, depth: 24, grotto: true };
-    Object.assign(game.bird, { x: 1097, alt: -22, inWater: lake, speed: 3, angle: 0, breath: 100 });
+    const lake = { x0: 1000, w: 100, depth: 32, grotto: true, mouth: { x: 1050, alt: -27, direction: 1 } };
+    Object.assign(game.bird, { x: lake.mouth.x + 0.5, alt: lake.mouth.alt, inWater: lake, speed: 3, angle: 0, breath: 100 });
     game.step(0.001);
     const o = game.state.grotto.octo;
     const start = o.x;
@@ -970,4 +1033,39 @@ test('right-side statuses stay below a busy catch log and inside the viewport', 
     expect(statuses.find(item => item.label.startsWith('E · Eyases')).y).toBeGreaterThan(chain.y + 17);
   }
   await page.screenshot({ path: testInfo.outputPath('right-side-statuses.png') });
+});
+
+test('achievements replace the shop without leaving text or buttons underneath', async ({ page }, testInfo) => {
+  const capture = () => page.evaluate(() => {
+    const game = window.__falconDiveDebug;
+    const ctx = document.querySelector('#hud-overlay').getContext('2d');
+    const original = ctx.fillText, text = [];
+    ctx.fillText = function (label, ...args) {
+      text.push(String(label));
+      return original.call(this, label, ...args);
+    };
+    try { game.render(); } finally { ctx.fillText = original; }
+    return { text, buttons: game.buttons.map(({ label, x, y, w, h }) => ({ label, x, y, w, h })) };
+  });
+  const click = ({ x, y, w, h }) => page.mouse.click(x + w / 2, y + h / 2);
+  await page.evaluate(() => window.__falconDiveDebug.showShop());
+  const shop = await capture();
+  expect(shop.text).toContain('The Roost');
+  await click(shop.buttons.find(button => button.label.includes('Achievements')));
+  const achievements = await capture();
+  expect(achievements.text).toContain('Achievements');
+  expect(achievements.text).not.toContain('The Roost');
+  expect(achievements.text.join(' ')).not.toMatch(/Flight Muscles|Next hunt|wallet|Start day/);
+  expect(achievements.buttons.map(button => button.label)).toEqual(['Back']);
+  await page.screenshot({ path: testInfo.outputPath('achievements.png') });
+  await click(achievements.buttons[0]);
+  const restored = await capture();
+  expect(restored.text).toContain('The Roost');
+  expect(restored.buttons).toEqual(shop.buttons);
+  await click(restored.buttons.find(button => button.label.includes('Achievements')));
+  await page.keyboard.press('Enter');
+  expect(await page.evaluate(() => window.__falconDiveDebug.screen)).toBe('shop');
+  expect((await capture()).buttons.map(button => button.label)).toEqual(['Back']);
+  await page.keyboard.press('Escape');
+  await expect.poll(() => page.evaluate(() => window.__falconDiveDebug.buttons.some(button => button.id === 'startDay'))).toBe(true);
 });

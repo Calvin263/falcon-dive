@@ -159,6 +159,8 @@ export const SPECIES = {
   // Fish live in lakes (air: 'water' keeps them out of the land/air spawn pools); depth is metres below the surface
   trout:    { name: 'Trout',    air: 'water', bounty: 30, weight: 0, depth: [0.6, 3], speed: 2.5, dart: 8, scale: 1.6 },
   pike:     { name: 'Pike',     air: 'water', bounty: 75, weight: 0, depth: [3, 15], speed: 1.6, dart: 6, scale: 2 },
+  lanternfish: { name: 'Lanternfish', air: 'water', bounty: 95, weight: 0, depth: [30, 39], speed: 2.8, dart: 7, scale: 1.5 },
+  anglerfish:  { name: 'Anglerfish',  air: 'water', bounty: 150, weight: 0, depth: [40, 51], speed: 1.1, dart: 4, scale: 1.9 },
 };
 export const ICON_SCALE = 2.0;   // sprite scale that maps to 1.0 in catch-card icons
 export const FALCON_SCALE = 1.5; // minimum on-screen size of the player

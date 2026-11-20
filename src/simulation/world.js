@@ -150,8 +150,22 @@ export function createWorld({ session, viewport, systems }) {
     return u;
   }
   function lakeAt(i) {
-    return terrain('lake', i, () => ({ x0: i * LAKE_SPACING + 400 + wh(i * 6.1 + 5) * 700, w: 150 + wh(i * 7.3 + 6) * 300, on: wh(i * 8.9 + 7) < 0.75,
-             depth: 10 + wh(i * 4.3 + 8) * 8, grotto: wh(i * 3.7 + 9) < 0.6 }));
+    return terrain('lake', i, () => {
+      const x0 = i * LAKE_SPACING + 400 + wh(i * 6.1 + 5) * 700, w = 150 + wh(i * 7.3 + 6) * 300;
+      const on = wh(i * 8.9 + 7) < 0.75;
+      const deep = wh(i * 11.3 + 13) < 0.3, depthRoll = wh(i * 4.3 + 8);
+      const grotto = on && deep && wh(i * 3.7 + 9) < 0.6;
+      const depth = deep ? 46 + depthRoll * 7 : 10 + depthRoll * 8;
+      const lake = { x0, w, on, depth, grotto };
+      if (!on || !deep) return lake;
+      const direction = wh(i * 5.3 + 19) < 0.5 ? -1 : 1;
+      const shelf = { x: x0 + w * (0.25 + 0.5 * wh(i * 9.7 + 17)), alt: -10 };
+      const lower = { x: shelf.x + direction * (14 + 3 * wh(i * 6.7 + 23)), alt: -21 - depthRoll * 5 };
+      const bottom = { x: lower.x + direction * (8 + 3 * wh(i * 8.3 + 29)), alt: 6 - depth };
+      lake.vents = [shelf, lower, bottom];
+      if (grotto) lake.mouth = { x: lower.x + direction * 7, alt: lower.alt - 3, direction };
+      return lake;
+    });
   }
   function lakeAtX(x) {
     const i = Math.floor((x - 400) / LAKE_SPACING);

@@ -93,6 +93,10 @@ export function createInput({ session, viewport, systems }) {
     viewport.canvas.addEventListener('contextmenu', e => e.preventDefault(), options);
     addEventListener('keydown', e => {
       if (session.screen !== 'hunt') {
+        if (session.screen === 'shop' && session.achView) {
+          if (e.key === 'Escape') session.achView = false;
+          return;
+        }
         if (e.key === 'Enter') { if (session.screen === 'recap') systems.session.showShop(); else systems.session.startDay(); }
         return;
       }

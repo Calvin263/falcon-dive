@@ -2,17 +2,20 @@ import { DAY_END_HOUR, STATS, SPECIES, DAY_LENGTH, AUTO_FIRE_DT, CAT_CELL, HUNTE
 import { clamp, randDir } from '../core/math.js';
 
 export function createWater({ session, viewport, systems }) {
-  function makeFish(l, kind) {
+  function makeFish(l, kind, habitatX) {
     const s = SPECIES[kind], dmax = Math.min(s.depth[1], l.depth - 0.6);
     const d = s.depth[0] + Math.random() * (dmax - s.depth[0]);
-    return { kind, lake: l, x: l.x0 + 4 + Math.random() * (l.w - 8), alt: -d, tAlt: -d, vx: randDir() * s.speed,
+    const minX = habitatX == null ? l.x0 + 2 : Math.max(l.x0 + 2, habitatX - 8);
+    const maxX = habitatX == null ? l.x0 + l.w - 2 : Math.min(l.x0 + l.w - 2, habitatX + 8);
+    const x = minX + 2 + Math.random() * (maxX - minX - 4);
+    return { kind, lake: l, x, minX, maxX, alt: -d, tAlt: -d, vx: randDir() * s.speed,
              ph: Math.random() * 10, fleeT: 0, riseT: 0, wanderT: 2 + Math.random() * 5, spooked: false };
   }
 
   function splashAt(x, l) {
     for (let i = 0; i < 30; i++) session.particles.push({ x: x + (Math.random() - 0.5) * 3, alt: 0.2, vx: (Math.random() - 0.5) * 16, vy: 4 + Math.random() * 12, life: 1 });
     for (const f of session.state.fish) {
-      if (f.lake.x0 !== l.x0 || Math.abs(f.x - x) > FISH_SPOOK) continue;
+      if (f.lake.x0 !== l.x0 || Math.abs(f.x - x) > FISH_SPOOK || f.alt < -15) continue;
       f.fleeT = 2.5; f.riseT = 0; f.spooked = true;
       f.vx = Math.sign(f.x - x || 1) * SPECIES[f.kind].dart;
       f.tAlt = -Math.min(SPECIES[f.kind].depth[1], l.depth - 0.6);
@@ -44,7 +47,7 @@ export function createWater({ session, viewport, systems }) {
         }
       }
       f.x += f.vx * dt;
-      if (f.x < l.x0 + 2 || f.x > l.x0 + l.w - 2) { f.x = clamp(f.x, l.x0 + 2, l.x0 + l.w - 2); f.vx = -f.vx; }
+      if (f.x < f.minX || f.x > f.maxX) { f.x = clamp(f.x, f.minX, f.maxX); f.vx = -f.vx; }
       f.alt += clamp(f.tAlt - f.alt, -1, 1) * dt * (f.fleeT > 0 ? 3 : 1.2);
       f.alt = clamp(f.alt, floor, -0.3);
       // Grab: swept from last frame so a fast plunge can't skip past a fish
@@ -73,7 +76,21 @@ export function createWater({ session, viewport, systems }) {
       return;
     }
   }
-  const grottoOpen = l => !!(l && l.grotto && !session.state.grottoCleared[l.x0]);
+  const grottoOpen = lake => !!(lake?.mouth && !session.state.grottoCleared[lake.x0]);
+
+  function updateLakeBreath(lake, dt) {
+    const bird = session.bird, capacity = systems.progression.swimBreath();
+    const inVent = lake.vents?.some(vent => Math.hypot(bird.x - vent.x, bird.alt - vent.alt) < VENT_R);
+    bird.breath = clamp((bird.breath ?? capacity) + ((inVent ? VENT_REFILL : 0) - 1) * dt, 0, capacity);
+  }
+
+  function atGrottoMouth(lake) {
+    const bird = session.bird;
+    if (!grottoOpen(lake) || !(bird.breath > 0)) return false;
+    const mouth = lake.mouth;
+    const along = (bird.x - mouth.x) * mouth.direction;
+    return bird.vx * mouth.direction > 0 && along >= 0 && along < 2 && Math.abs(bird.alt - mouth.alt) < 2;
+  }
 
   function enterGrotto(l) {
     const tents = [];
@@ -91,12 +108,18 @@ export function createWater({ session, viewport, systems }) {
   function exitGrotto() {
     const g = session.state.grotto, l = g.lake;
     session.state.grotto = null;
-    session.bird.x = l.x0 + l.w - 4; session.bird.alt = -(l.depth - 2.5); session.bird.angle = Math.PI; session.bird.speed = 3;
+    const mouth = l.mouth;
+    session.bird.x = mouth.x - mouth.direction * 3;
+    session.bird.alt = mouth.alt + 1;
+    session.bird.angle = mouth.direction === -1 ? 0 : Math.PI;
+    session.bird.speed = 3;
     session.bird.breath = g.octo.hp <= 0 ? systems.progression.swimBreath() : Math.max(session.bird.breath, 3);
     session.bird.vx = 0; session.bird.vy = 0;
     session.state.rockets = []; session.state.tracers = [];
     session.mouse.steer = null;
     session.cam.ox = NaN; session.cam.gz = NaN; session.cam.floorPx = NaN; session.cam.pin = null;
+    session.cam.diveFollow = true;
+    session.cam.waterFrame = 1;
   }
 
   const tentAnchor = (o, k) => ({ x: o.x - 0.6 + (k - 3.5) * 0.35, alt: o.alt - 2.4 });
@@ -309,5 +332,5 @@ export function createWater({ session, viewport, systems }) {
     hz.cats = hz.cats.filter(c => !c.gone && Math.abs(c.x - session.bird.x) < 3000);
     hz.hunters = hz.hunters.filter(h => !h.gone && Math.abs(h.x - session.bird.x) < 3000);
   }
-  return { catchDuckFromBelow, enterGrotto, grottoOpen, grottoTargets, makeFish, octoHit, spawnHazards, splashAt, tentAnchor, tentTip, updateFish, updateGrotto };
+  return { atGrottoMouth, catchDuckFromBelow, enterGrotto, grottoOpen, grottoTargets, makeFish, octoHit, spawnHazards, splashAt, tentAnchor, tentTip, updateFish, updateGrotto, updateLakeBreath };
 }

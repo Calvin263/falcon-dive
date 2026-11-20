@@ -263,25 +263,16 @@ export function createRenderer({ session, viewport, systems }) {
       // Lake bed
       const bedY = systems.flight.toScreenY(-l.depth);
       if (bedY < viewport.H) { viewport.ctx.fillStyle = rgb(mixRGB([40, 34, 22], [104, 88, 58], d)); viewport.ctx.fillRect(x0, bedY, x1 - x0, viewport.H - bedY); }
-      // Octopus Grotto: a dark cave mouth at the bottom of the far end, with a pair of eyes in the gloom
-      if (systems.water.grottoOpen(l)) {
-        const cx = systems.flight.toScreenX(l.x0 + l.w), cy = bedY, rw = 7 * session.cam.zoom, rh = 5 * session.cam.zoomY;
-        viewport.ctx.fillStyle = '#05080c';
-        viewport.ctx.beginPath(); viewport.ctx.ellipse(cx, cy, rw, rh, 0, Math.PI, Math.PI * 1.5); viewport.ctx.lineTo(cx, cy); viewport.ctx.closePath(); viewport.ctx.fill();
-        viewport.ctx.strokeStyle = rgb(mixRGB([30, 26, 18], [80, 66, 44], d)); viewport.ctx.lineWidth = Math.max(2, 0.6 * session.cam.zoom);
-        viewport.ctx.beginPath(); viewport.ctx.ellipse(cx, cy, rw, rh, 0, Math.PI, Math.PI * 1.5); viewport.ctx.stroke();
-        if (Math.sin(session.state.time * 0.9 + i) > -0.6) {
-          viewport.ctx.fillStyle = '#ffe14d';
-          for (const ox of [-0.38, -0.22]) { viewport.ctx.beginPath(); viewport.ctx.arc(cx + ox * rw, cy - rh * 0.42, Math.max(1.2, 0.25 * session.cam.zoom), 0, Math.PI * 2); viewport.ctx.fill(); }
-        }
-      }
+      if (l.vents) drawBasinDetails(l);
       // Fish: the deeper, the fainter; feeding trout dimple the surface
       for (const f of session.state.fish) {
         if (f.lake.x0 !== l.x0) continue;
-        const fx = systems.flight.toScreenX(f.x);
-        if (fx < -30 || fx > viewport.W + 30) continue;
-        viewport.ctx.globalAlpha = clamp(1 - (-f.alt) / (l.depth + 1), 0.12, 0.9) * (0.4 + 0.6 * d);
-        systems.sprites.drawFish(fx, systems.flight.toScreenY(f.alt), f, systems.settings.animalScaleFor(f.kind) * Math.max(0.6, Math.min(1.6, session.cam.zoom / 8)));
+        const fx = systems.flight.toScreenX(f.x), fy = systems.flight.toScreenY(f.alt);
+        if (fx < -45 || fx > viewport.W + 45 || fy < -45 || fy > viewport.H + 45) continue;
+        const nearby = SPECIES[f.kind].depth[0] >= 30 && session.bird.inWater?.x0 === l.x0;
+        const glow = nearby ? clamp((f.alt - session.bird.alt + 18) / 12, 0, 1) : 0;
+        viewport.ctx.globalAlpha = Math.max(glow * 0.9, clamp(1 - (-f.alt) / (l.depth + 1), 0.12, 0.9) * (0.4 + 0.6 * d));
+        systems.sprites.drawFish(fx, fy, f, systems.settings.animalScaleFor(f.kind) * Math.max(0.6, Math.min(1.6, session.cam.zoom / 8)));
         viewport.ctx.globalAlpha = 1;
         if (f.alt > -0.8 && Math.sin(f.ph * 2.5) > 0.6) {
           viewport.ctx.strokeStyle = 'rgba(255,255,255,0.6)'; viewport.ctx.lineWidth = 1;
@@ -309,6 +300,73 @@ export function createRenderer({ session, viewport, systems }) {
       viewport.ctx.fillStyle = `rgba(0,0,0,${0.55 * fade})`;
       viewport.ctx.beginPath(); viewport.ctx.ellipse(sx, groundY + 1, w, h, 0, 0, Math.PI * 2); viewport.ctx.fill();
     }
+  }
+
+  function drawBasinDetails(lake) {
+    const ctx = viewport.ctx, { toScreenX: sx, toScreenY: sy } = systems.flight;
+    const { zoom, zoomY } = session.cam, time = session.state.time;
+    const [shelf, lower] = lake.vents;
+    const direction = Math.sign(lower.x - shelf.x);
+    const depth = session.bird.inWater?.x0 === lake.x0 ? -session.bird.alt : 0;
+    const ellipse = (x, alt, width, height, start = 0, end = Math.PI * 2) => {
+      ctx.beginPath(); ctx.ellipse(sx(x), sy(alt), zoom * width, zoomY * height, 0, start, end);
+    };
+    ctx.save();
+    const shelfFade = clamp((depth - 2) / 5, 0, 1);
+    if (shelfFade > 0) {
+      ctx.globalAlpha = shelfFade;
+      ctx.fillStyle = '#294f59';
+      ctx.beginPath();
+      ctx.moveTo(sx(shelf.x - direction * 25), sy(-lake.depth));
+      ctx.lineTo(sx(shelf.x - direction * 13), sy(shelf.alt - 4));
+      ctx.lineTo(sx(shelf.x + direction * 2), sy(shelf.alt - 1));
+      ctx.lineTo(sx(shelf.x + direction * 8), sy(shelf.alt - 6));
+      ctx.lineTo(sx(shelf.x + direction * 14), sy(-lake.depth));
+      ctx.fill();
+    }
+    const mouth = lake.mouth, caveFade = clamp((depth - 13) / 6, 0, 1);
+    if (mouth && caveFade > 0) {
+      ctx.globalAlpha = caveFade;
+      ctx.fillStyle = '#294b56';
+      ctx.beginPath();
+      ctx.moveTo(sx(mouth.x - direction * 4), sy(-lake.depth));
+      ctx.lineTo(sx(mouth.x + direction * 9), sy(-lake.depth));
+      ctx.lineTo(sx(mouth.x + direction * 8), sy(mouth.alt + 6));
+      ctx.lineTo(sx(mouth.x - direction * 5), sy(mouth.alt + 3));
+      ctx.lineTo(sx(mouth.x + direction * 2), sy(mouth.alt + 2));
+      ctx.fill();
+      ctx.fillStyle = '#091922';
+      ellipse(mouth.x, mouth.alt, 3.3, 2.3); ctx.fill();
+      ctx.fillStyle = '#d2bd97';
+      for (let shell = 0; shell < 5; shell++) {
+        ellipse(mouth.x - direction * (2 + shell * 1.6), mouth.alt - 2.5 + shell * 0.4, 0.35, 0.22, Math.PI, 2 * Math.PI);
+        ctx.fill();
+      }
+      const ink = (time * 0.22) % 1;
+      if (ink < 0.45 && systems.water.grottoOpen(lake)) {
+        ctx.globalAlpha = caveFade * (1 - ink / 0.45) * 0.55;
+        ctx.fillStyle = '#11172e';
+        ellipse(mouth.x - direction * ink * 13, mouth.alt + ink * 5, 1 + ink * 4, 1); ctx.fill();
+      }
+    }
+    ctx.strokeStyle = '#beeee5'; ctx.lineWidth = 1;
+    for (const [index, vent] of lake.vents.entries()) {
+      const previousAlt = index > 0 ? lake.vents[index - 1].alt : 0;
+      const fade = index === 0 ? 1 : clamp((depth + previousAlt + 8) / 5, 0, 1);
+      if (!fade) continue;
+      const height = previousAlt - vent.alt + (index > 0 ? 2 : 0);
+      ctx.globalAlpha = fade * shelfFade;
+      ctx.fillStyle = '#426b70';
+      ellipse(vent.x, vent.alt - 0.9, 0.9, 0.5); ctx.fill();
+      for (let bubble = 0; bubble < 9; bubble++) {
+        const rise = (time * 3.5 + bubble * height / 9) % height;
+        const x = vent.x + Math.sin(bubble * 2 + rise * 0.55) * Math.min(1.25, rise * 0.3);
+        const radius = Math.max(1.2, zoom * (0.13 + (bubble % 3) * 0.05));
+        ctx.globalAlpha = fade * (0.55 + 0.35 * (1 - rise / height));
+        ctx.beginPath(); ctx.arc(sx(x), sy(vent.alt + rise), radius, 0, Math.PI * 2); ctx.stroke();
+      }
+    }
+    ctx.restore();
   }
 
   // Sun direction marker on the screen edge, along the line from the bird toward the sun

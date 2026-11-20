@@ -371,9 +371,88 @@ test('secret upgrades and achievements give no advance hints', () => {
   assert.ok(systems.progression.shopUpgrades().some(u => u.id === 'rifle'));
 });
 
+test('lake depth, grotto presence, and deep routes vary without any fixed spawn slots', () => {
+  const { session, systems } = fixture();
+  const cases = new Set(), slotTypes = new Set();
+  const seeds = [0, 37, 143, 256, 511, 843];
+  for (const seed of seeds) {
+    session.worldSeed = seed;
+    slotTypes.add(`${systems.world.lakeAt(0).on}:${!!systems.world.lakeAt(0).vents}`);
+    for (let index = -30; index < 30; index++) {
+      const lake = systems.world.lakeAt(index);
+      if (!lake.on) continue;
+      cases.add(`${!!lake.vents}:${lake.grotto}`);
+      if (!lake.vents) {
+        assert.equal(lake.grotto, false);
+        assert.equal(lake.mouth, undefined);
+        assert.equal(systems.water.grottoOpen(lake), false);
+        continue;
+      }
+      assert.ok(lake.depth >= 46);
+      assert.equal(lake.vents.length, 3);
+      for (const [index, vent] of lake.vents.entries()) {
+        assert.equal(systems.world.lakeAtX(vent.x), lake);
+        assert.ok(vent.alt > -lake.depth);
+        if (index === 0) continue;
+        const previous = lake.vents[index - 1];
+        assert.ok(vent.alt < previous.alt);
+        assert.ok(Math.hypot(vent.x - previous.x, vent.alt - previous.alt) < 24);
+      }
+      assert.equal(!!lake.mouth, lake.grotto);
+      if (lake.mouth) assert.equal(systems.world.lakeAtX(lake.mouth.x), lake);
+    }
+  }
+  assert.deepEqual(cases, new Set(['false:false', 'true:false', 'true:true']));
+  assert.ok(slotTypes.size > 1);
+  const last = structuredClone(systems.world.lakeAt(0));
+  session.worldSeed = 0;
+  systems.world.lakeAt(0);
+  session.worldSeed = seeds.at(-1);
+  assert.deepEqual(systems.world.lakeAt(0), last);
+});
+
+test('deep fish spawn only in basins and stay within reach of the bottom air route', () => {
+  const { session, systems } = fixture();
+  session.worldSeed = 256;
+  session.state.fish = [];
+  session.state.spawn.lakes.clear();
+  const lakes = Array.from({ length: 60 }, (_, index) => systems.world.lakeAt(index - 30));
+  const basin = lakes.find(lake => lake.vents);
+  session.bird.x = basin.vents.at(-1).x;
+  systems.prey.spawnPreyAhead();
+  const fish = session.state.fish.filter(item => item.lake === basin && ['anglerfish', 'lanternfish'].includes(item.kind));
+  assert.equal(fish.filter(item => item.kind === 'anglerfish').length, 1);
+  assert.equal(fish.filter(item => item.kind === 'lanternfish').length, 3);
+  for (const item of fish) {
+    assert.ok(-item.alt >= SPECIES[item.kind].depth[0] && item.alt > -basin.depth);
+    assert.ok(Math.abs(item.x - basin.vents.at(-1).x) < 14);
+  }
+  const angler = fish.find(item => item.kind === 'anglerfish');
+  angler.x = angler.maxX;
+  angler.vx = 2;
+  systems.water.splashAt(angler.x, basin);
+  assert.equal(angler.spooked, false);
+  systems.water.updateFish(1 / 60);
+  assert.equal(angler.x, angler.maxX);
+  assert.ok(angler.vx < 0);
+  const score = session.state.score;
+  Object.assign(session.bird, { x: angler.x, alt: angler.alt, inWater: basin, entrySpeed: 30, vx: 0, vy: 0 });
+  systems.water.updateFish(1 / 60);
+  assert.ok(!session.state.fish.includes(angler));
+  assert.equal(session.state.lastCatch.kind, 'anglerfish');
+  assert.ok(session.state.score > score);
+  const shallow = lakes.find(lake => lake.on && !lake.vents);
+  session.bird.x = shallow.x0 + shallow.w / 2;
+  systems.prey.spawnPreyAhead();
+  const shallowFish = session.state.fish.filter(item => item.lake === shallow);
+  assert.ok(shallowFish.length > 0);
+  assert.ok(shallowFish.every(item => ['trout', 'pike'].includes(item.kind)));
+});
+
 test('grottos are random world features independent of gun progression', () => {
   const { session, systems } = fixture();
-  const lakes = Array.from({ length: 60 }, (_, i) => systems.world.lakeAt(i));
+  session.worldSeed = 256;
+  const lakes = Array.from({ length: 60 }, (_, index) => systems.world.lakeAt(index - 30));
   assert.ok(lakes.some(l => l.on && l.grotto));
   assert.ok(lakes.some(l => l.on && !l.grotto));
   const lake = lakes.find(l => l.on && l.grotto);
@@ -382,9 +461,38 @@ test('grottos are random world features independent of gun progression', () => {
   assert.equal(systems.water.grottoOpen(lake), false);
 });
 
+test('generated basin vents refill locally and mouths work in either direction without upgrades', () => {
+  const { session, systems } = fixture();
+  const lakes = [0, 37, 143, 256, 511, 843].flatMap(seed => {
+    session.worldSeed = seed;
+    return Array.from({ length: 60 }, (_, index) => systems.world.lakeAt(index - 30));
+  });
+  for (const direction of [-1, 1]) {
+    const lake = lakes.find(candidate => candidate.mouth?.direction === direction);
+    assert.ok(lake);
+    const { bird } = session;
+    Object.assign(bird, lake.vents[1], { breath: 1, inWater: lake });
+    systems.water.updateLakeBreath(lake, 0.5);
+    assert.equal(bird.breath, systems.progression.swimBreath());
+    bird.alt += 4;
+    systems.water.updateLakeBreath(lake, 0.5);
+    assert.equal(bird.breath, systems.progression.swimBreath() - 0.5);
+    Object.assign(bird, lake.mouth, { vx: -direction });
+    assert.equal(systems.water.atGrottoMouth(lake), false);
+    bird.vx = direction;
+    assert.equal(systems.water.atGrottoMouth(lake), true);
+    systems.water.enterGrotto(lake);
+    Object.assign(bird, { x: 0.4, angle: Math.PI, speed: 0.3 });
+    systems.water.updateGrotto(0.01);
+    assert.equal(session.state.grotto, null);
+    assert.equal(bird.x, lake.mouth.x - direction * 3);
+    assert.equal(bird.alt, lake.mouth.alt + 1);
+  }
+});
+
 function grottoEncounter() {
   const game = fixture();
-  const lake = { x0: 1000, w: 100, depth: 24, grotto: true };
+  const lake = { x0: 1000, w: 100, depth: 32, grotto: true, mouth: { x: 1050, alt: -27, direction: 1 } };
   game.session.bird.inWater = lake;
   game.systems.water.enterGrotto(lake);
   game.session.bird.breath = 100;
@@ -464,7 +572,8 @@ test('grotto end wall blocks swimming and gun rays; defeat still awards and perm
   systems.water.updateGrotto(0.01);
   assert.equal(session.state.grotto, null);
   assert.equal(session.bird.inWater, g.lake);
-  assert.equal(session.bird.x, g.lake.x0 + g.lake.w - 4);
+  assert.equal(session.bird.x, g.lake.mouth.x - 3);
+  assert.equal(session.bird.alt, g.lake.mouth.alt + 1);
 });
 
 test('base turtles drop without aiming and the first aim upgrade adds a push', () => {
@@ -825,4 +934,27 @@ test('graphics quality preset persists and restores the canvas scale', () => {
   const restored = fixture({ [SETTINGS_KEY]: { graphicsPreset: 'high', animalSizes: DEFAULT_ANIMAL_SIZES } });
   assert.equal(restored.viewport.resolutionScale, 1);
   assert.equal(restored.session.settings.graphicsPreset, 'high');
+});
+
+test('water framing holds at the surface and stays engaged through a shallow ascent', () => {
+  const { session, systems } = fixture();
+  session.worldSeed = 256;
+  const lake = Array.from({ length: 30 }, (_, index) => systems.world.lakeAt(index)).find(candidate => candidate.vents);
+  const x = lake.vents[0].x;
+  Object.assign(session.cam, { x, alt: 20, surfaceAlt: 20 });
+  Object.assign(session.mouse, { x: 640, y: 700 });
+  const swimFrame = (alt, angle) => {
+    Object.assign(session.bird, { x, inWater: lake, alt, angle, speed: 5 });
+    systems.flight.update(1 / 60);
+  };
+  swimFrame(-1, -Math.PI / 2);
+  assert.equal(session.cam.waterFrame, 0);
+  assert.equal(session.cam.alt, 20);
+  swimFrame(-4, -Math.PI / 2);
+  assert.ok(session.cam.alt < 20);
+  swimFrame(-1.5, Math.PI / 2);
+  assert.equal(session.cam.diveFollow, true);
+  swimFrame(-0.4, Math.PI / 2);
+  assert.equal(session.cam.diveFollow, false);
+  assert.ok(session.cam.waterFrame > 0);
 });
